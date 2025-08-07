@@ -19,3 +19,11 @@ thiserror = { workspace = true }
 
 # Validation
 regex = { workspace = true }
+
+# Network namespace management
+netlink-packet-route = { workspace = true }
+rtnetlink = { workspace = true }
+nix = { workspace = true }
+
+# Async runtime
+monoio = { workspace = true }

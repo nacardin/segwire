@@ -84,3 +84,10 @@ export RUST_BACKTRACE=full
 - **Async/Await**: All I/O operations use async patterns with monoio runtime
 - **Error Propagation**: Consistent error handling with `anyhow::Result` and custom error types
 - **Configuration-Driven**: Declarative TOML-based configuration approach
+
+## Async Runtime Guidelines
+- **MUST USE**: `monoio` as the async runtime for all async operations
+- **DO NOT USE**: `tokio` - monoio provides better performance with io_uring
+- **Spawning Tasks**: Use `monoio::spawn()` instead of `tokio::spawn()`
+- **Async Functions**: All async functions should be compatible with monoio runtime
+- **Dependencies**: Ensure all async dependencies are compatible with monoio or provide monoio-compatible alternatives

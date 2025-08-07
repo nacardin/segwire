@@ -7,9 +7,11 @@
 pub mod config;
 pub mod dbus;
 pub mod error;
+pub mod netlink;
 pub mod utils;
 
 // Re-export commonly used types
 pub use error::{SegwireError, SegwireResult};
 pub use config::{DaemonConfig, NamespaceConfig};
 pub use dbus::{NamespaceState, NamespaceStatus};
+pub use netlink::{NetlinkManager, NamespaceInfo, NetlinkError, RouteConfig, DnsConfig};

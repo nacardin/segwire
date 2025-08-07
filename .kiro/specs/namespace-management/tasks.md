@@ -57,20 +57,20 @@
     - Add debouncing for rapid file changes
     - _Requirements: 1.3, 1.4_
 
-- [ ] 5. Implement network namespace management core
-  - [ ] 5.1 Create netlink interface wrapper
+- [x] 5. Implement network namespace management core
+  - [x] 5.1 Create netlink interface wrapper
     - Implement netlink socket communication for namespace operations
     - Add namespace creation and deletion functions
     - Create error handling for netlink operations
     - _Requirements: 1.2, 1.5, 7.5_
 
-  - [ ] 5.2 Implement network interface management
+  - [x] 5.2 Implement network interface management
     - Add functions to move interfaces between namespaces
     - Implement interface validation and availability checking
     - Create virtual interface creation (veth pairs)
     - _Requirements: 2.4, 7.5_
 
-  - [ ] 5.3 Add routing and DNS configuration
+  - [x] 5.3 Add routing and DNS configuration
     - Implement routing table configuration within namespaces
     - Add DNS resolver configuration for namespaces
     - Create route validation and conflict detection

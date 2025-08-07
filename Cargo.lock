@@ -1424,7 +1424,11 @@ name = "segwire-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "monoio",
+ "netlink-packet-route",
+ "nix 0.27.1",
  "regex",
+ "rtnetlink",
  "serde",
  "thiserror 1.0.69",
  "toml",

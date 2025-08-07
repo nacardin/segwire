@@ -35,7 +35,7 @@ regex = "1.0"
 # Network namespace management
 netlink-packet-route = "0.17"
 rtnetlink = "0.13"
-nix = "0.27"
+nix = { version = "0.27", features = ["user", "process"] }
 
 # Logging
 tracing = "0.1"

@@ -12,7 +12,7 @@ pub enum SegwireError {
     Config(#[from] ConfigError),
     
     #[error("Network operation failed: {0}")]
-    Network(#[from] NetworkError),
+    Network(String),
     
     #[error("D-Bus error: {0}")]
     DBus(#[from] zbus::Error),
