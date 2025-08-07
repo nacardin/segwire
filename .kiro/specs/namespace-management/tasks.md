@@ -25,14 +25,14 @@
     - Write unit tests for variable substitution
     - _Requirements: 2.8_
 
-- [ ] 3. Create D-Bus interface definitions and types
-  - [ ] 3.1 Define D-Bus interface structures in segwire-common
+- [x] 3. Create D-Bus interface definitions and types
+  - [x] 3.1 Define D-Bus interface structures in segwire-common
     - Create method signatures for all daemon operations
     - Define signal types for status updates and progress
     - Implement D-Bus error types with descriptive messages
     - _Requirements: 6.1, 6.2, 6.6_
 
-  - [ ] 3.2 Implement D-Bus introspection support
+  - [x] 3.2 Implement D-Bus introspection support
     - Generate introspection XML from interface definitions
     - Add method discovery and enumeration support
     - Write tests for introspection functionality
