@@ -38,20 +38,20 @@
     - Write tests for introspection functionality
     - _Requirements: 6.7_
 
-- [ ] 4. Build daemon configuration management system
-  - [ ] 4.1 Implement master configuration loading
+- [x] 4. Build daemon configuration management system
+  - [x] 4.1 Implement master configuration loading
     - Create configuration file reader with error handling
     - Add namespace prefix parsing and validation
     - Implement configuration directory path resolution
     - _Requirements: 1.1, 2.2, 2.3_
 
-  - [ ] 4.2 Create namespace configuration scanner
+  - [x] 4.2 Create namespace configuration scanner
     - Implement directory scanning for .toml files
     - Add configuration file parsing with detailed error reporting
     - Filter configurations by daemon namespace prefix
     - _Requirements: 1.1, 1.2, 2.3, 2.9_
 
-  - [ ] 4.3 Add file system monitoring with monoio
+  - [x] 4.3 Add file system monitoring with monoio
     - Implement io_uring-based file watching for configuration changes
     - Handle file creation, modification, and deletion events
     - Add debouncing for rapid file changes

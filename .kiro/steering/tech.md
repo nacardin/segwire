@@ -73,6 +73,12 @@ cargo fmt
 cargo clippy
 ```
 
+### Environment Varialbes
+```bash
+# Enable backtraces
+export RUST_BACKTRACE=full
+```
+
 ## Architecture Patterns
 - **Shared Library Pattern**: Common types and utilities in `segwire-common`
 - **Async/Await**: All I/O operations use async patterns with monoio runtime
