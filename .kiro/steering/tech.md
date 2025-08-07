@@ -55,6 +55,12 @@ cargo test
 cargo test -p segwire-common
 ```
 
+### Running
+```bash
+# Run specific crate
+cargo run --bin segwire-cli
+```
+
 ### Development
 ```bash
 # Check code without building

@@ -2,5 +2,24 @@
 name = "segwire-cli"
 version = "0.1.0"
 edition = "2021"
+description = "Command-line interface for segwire network namespace management"
 
 [dependencies]
+# Shared library
+segwire-common = { workspace = true }
+
+# D-Bus communication
+zbus = { workspace = true }
+
+# Command-line interface
+clap = { workspace = true }
+
+# Output formatting
+tabled = { workspace = true }
+serde_json = { workspace = true }
+
+# Async runtime using io_uring
+monoio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }

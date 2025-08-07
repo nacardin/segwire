@@ -2,5 +2,31 @@
 name = "segwire-daemon"
 version = "0.1.0"
 edition = "2021"
+description = "System daemon for managing Linux network namespaces"
 
 [dependencies]
+# Shared library
+segwire-common = { workspace = true }
+
+# D-Bus communication
+zbus = { workspace = true }
+
+# Network namespace management
+netlink-packet-route = { workspace = true }
+rtnetlink = { workspace = true }
+nix = { workspace = true }
+
+# Configuration parsing
+toml = { workspace = true }
+serde = { workspace = true }
+
+# File system monitoring with io_uring
+monoio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }

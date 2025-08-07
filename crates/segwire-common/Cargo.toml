@@ -1,0 +1,21 @@
+[package]
+name = "segwire-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared library for segwire network namespace management system"
+
+[dependencies]
+# D-Bus communication types
+zbus = { workspace = true }
+zvariant = { workspace = true }
+
+# Configuration parsing
+toml = { workspace = true }
+serde = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Validation
+regex = { workspace = true }
