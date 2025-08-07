@@ -7,7 +7,7 @@
   - _Requirements: 2.1, 2.2, 6.1_
 
 - [ ] 2. Implement core configuration types and parsing
-  - [ ] 2.1 Create TOML configuration structures in segwire-common
+  - [x] 2.1 Create TOML configuration structures in segwire-common
     - Define master daemon configuration structure
     - Define namespace configuration structure with all fields
     - Implement serde serialization/deserialization
