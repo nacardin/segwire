@@ -116,10 +116,18 @@ pub fn validate_cidr(cidr: &str) -> SegwireResult<()> {
     let prefix: u8 = parts[1].parse()
         .map_err(|_| SegwireError::Validation("Invalid prefix length in CIDR".to_string()))?;
     
-    // Check prefix length bounds (IPv4: 0-32, IPv6: 0-128)
-    // For simplicity, we'll allow 0-128 for both
-    if prefix > 128 {
-        return Err(SegwireError::Validation("Prefix length cannot exceed 128".to_string()));
+    // Check prefix length bounds based on IP version
+    let ipv4_re = Regex::new(r"^(\d{1,3}\.){3}\d{1,3}$").unwrap();
+    let max_prefix = if ipv4_re.is_match(parts[0]) {
+        32 // IPv4
+    } else {
+        128 // IPv6
+    };
+    
+    if prefix > max_prefix {
+        return Err(SegwireError::Validation(
+            format!("Prefix length cannot exceed {} for this IP version", max_prefix)
+        ));
     }
     
     Ok(())
@@ -166,6 +174,39 @@ pub fn namespace_matches_prefix(prefix: &str, full_name: &str) -> bool {
     full_name.starts_with(&expected_prefix)
 }
 
+/// Validate domain name format
+pub fn validate_domain_name(domain: &str) -> SegwireResult<()> {
+    if domain.is_empty() {
+        return Err(SegwireError::Validation("Domain name cannot be empty".to_string()));
+    }
+    
+    if domain.len() > 253 {
+        return Err(SegwireError::Validation("Domain name cannot exceed 253 characters".to_string()));
+    }
+    
+    // Handle trailing dot (FQDN)
+    let domain_to_check = if domain.ends_with('.') {
+        &domain[..domain.len()-1]
+    } else {
+        domain
+    };
+    
+    // Basic domain name validation
+    let re = Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$").unwrap();
+    if !re.is_match(domain_to_check) {
+        return Err(SegwireError::Validation(format!("Invalid domain name format: {}", domain)));
+    }
+    
+    // Check that no label exceeds 63 characters
+    for label in domain_to_check.split('.') {
+        if label.len() > 63 {
+            return Err(SegwireError::Validation("Domain label cannot exceed 63 characters".to_string()));
+        }
+    }
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +251,47 @@ mod tests {
         assert_eq!(extract_namespace_name("segwire", "segwire-test"), Some("test".to_string()));
         assert_eq!(extract_namespace_name("app", "segwire-test"), None);
         assert_eq!(extract_namespace_name("segwire", "test"), None);
+    }
+
+    #[test]
+    fn test_validate_cidr() {
+        assert!(validate_cidr("192.168.1.0/24").is_ok());
+        assert!(validate_cidr("10.0.0.0/8").is_ok());
+        assert!(validate_cidr("::1/128").is_ok());
+        assert!(validate_cidr("192.168.1.0").is_err()); // Missing prefix
+        assert!(validate_cidr("192.168.1.0/33").is_err()); // Invalid prefix for IPv4
+        assert!(validate_cidr("invalid/24").is_err()); // Invalid IP
+    }
+
+    #[test]
+    fn test_validate_domain_name() {
+        assert!(validate_domain_name("example.com").is_ok());
+        assert!(validate_domain_name("sub.example.com").is_ok());
+        assert!(validate_domain_name("test-domain.org").is_ok());
+        assert!(validate_domain_name("").is_err()); // Empty domain
+        assert!(validate_domain_name("invalid..domain").is_err()); // Double dot
+        assert!(validate_domain_name(".example.com").is_err()); // Starting with dot
+        assert!(validate_domain_name("example.com.").is_ok()); // Trailing dot is valid
+        
+        // Test very long domain name
+        let long_domain = "a".repeat(254);
+        assert!(validate_domain_name(&long_domain).is_err());
+        
+        // Test long label
+        let long_label = format!("{}.com", "a".repeat(64));
+        assert!(validate_domain_name(&long_label).is_err());
+    }
+
+    #[test]
+    fn test_validate_namespace_prefix() {
+        assert!(validate_namespace_prefix("segwire").is_ok());
+        assert!(validate_namespace_prefix("app-1").is_ok());
+        assert!(validate_namespace_prefix("").is_err()); // Empty prefix
+        assert!(validate_namespace_prefix("1invalid").is_err()); // Starting with number
+        assert!(validate_namespace_prefix("invalid_prefix").is_err()); // Underscore not allowed
+        
+        // Test very long prefix
+        let long_prefix = "a".repeat(33);
+        assert!(validate_namespace_prefix(&long_prefix).is_err());
     }
 }
