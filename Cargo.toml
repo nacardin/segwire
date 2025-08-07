@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/segwire-daemon",
+    "crates/segwire-cli"
+]
+resolver = "2"
