@@ -443,8 +443,44 @@ impl NamespaceConfig {
     
     /// Substitute environment variables in configuration values
     pub fn substitute_environment_variables(&mut self) -> SegwireResult<()> {
-        // This is a placeholder for environment variable substitution
-        // Will be implemented in task 2.3
+        use crate::utils::substitute_env_vars;
+        
+        // Substitute in namespace settings
+        self.namespace.name = substitute_env_vars(&self.namespace.name, &self.environment)?;
+        self.namespace.description = substitute_env_vars(&self.namespace.description, &self.environment)?;
+        
+        // Substitute in interface configuration
+        for interface in &mut self.interfaces.move_interfaces {
+            *interface = substitute_env_vars(interface, &self.environment)?;
+        }
+        
+        for vif in &mut self.interfaces.virtual_interfaces {
+            vif.name = substitute_env_vars(&vif.name, &self.environment)?;
+            vif.interface_type = substitute_env_vars(&vif.interface_type, &self.environment)?;
+            if let Some(ref mut peer) = vif.peer {
+                *peer = substitute_env_vars(peer, &self.environment)?;
+            }
+        }
+        
+        // Substitute in routing configuration
+        if let Some(ref mut gateway) = self.routing.default_gateway {
+            *gateway = substitute_env_vars(gateway, &self.environment)?;
+        }
+        
+        for route in &mut self.routing.routes {
+            route.destination = substitute_env_vars(&route.destination, &self.environment)?;
+            route.gateway = substitute_env_vars(&route.gateway, &self.environment)?;
+        }
+        
+        // Substitute in DNS configuration
+        for server in &mut self.dns.servers {
+            *server = substitute_env_vars(server, &self.environment)?;
+        }
+        
+        for domain in &mut self.dns.search {
+            *domain = substitute_env_vars(domain, &self.environment)?;
+        }
+        
         Ok(())
     }
     
@@ -750,5 +786,165 @@ config_dir = "/tmp"
         // Test duplicate DNS servers
         config.servers = vec!["8.8.8.8".to_string(), "8.8.8.8".to_string()];
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_environment_variable_substitution() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("APP_NAME".to_string(), "test-app".to_string());
+        env_vars.insert("NETWORK_PREFIX".to_string(), "192.168.100".to_string());
+        env_vars.insert("DNS_SERVER".to_string(), "8.8.8.8".to_string());
+
+        let mut config = NamespaceConfig {
+            namespace: NamespaceSettings {
+                name: "${APP_NAME}".to_string(),
+                description: "Namespace for ${APP_NAME}".to_string(),
+            },
+            interfaces: InterfaceConfig {
+                move_interfaces: vec!["${APP_NAME}-eth0".to_string()],
+                virtual_interfaces: vec![VirtualInterface {
+                    name: "veth-${APP_NAME}".to_string(),
+                    interface_type: "veth".to_string(),
+                    peer: Some("veth-${APP_NAME}-host".to_string()),
+                }],
+            },
+            routing: RoutingConfig {
+                default_gateway: Some("${NETWORK_PREFIX}.1".to_string()),
+                routes: vec![Route {
+                    destination: "10.0.0.0/8".to_string(),
+                    gateway: "${NETWORK_PREFIX}.1".to_string(),
+                    metric: Some(100),
+                }],
+            },
+            dns: DnsConfig {
+                servers: vec!["${DNS_SERVER}".to_string()],
+                search: vec!["${APP_NAME}.local".to_string()],
+            },
+            environment: env_vars,
+        };
+
+        // Perform substitution
+        config.substitute_environment_variables().unwrap();
+
+        // Verify substitutions
+        assert_eq!(config.namespace.name, "test-app");
+        assert_eq!(config.namespace.description, "Namespace for test-app");
+        assert_eq!(config.interfaces.move_interfaces[0], "test-app-eth0");
+        assert_eq!(config.interfaces.virtual_interfaces[0].name, "veth-test-app");
+        assert_eq!(config.interfaces.virtual_interfaces[0].peer.as_ref().unwrap(), "veth-test-app-host");
+        assert_eq!(config.routing.default_gateway.as_ref().unwrap(), "192.168.100.1");
+        assert_eq!(config.routing.routes[0].gateway, "192.168.100.1");
+        assert_eq!(config.dns.servers[0], "8.8.8.8");
+        assert_eq!(config.dns.search[0], "test-app.local");
+    }
+
+    #[test]
+    fn test_environment_variable_substitution_with_defaults() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("SET_VAR".to_string(), "set_value".to_string());
+
+        let mut config = NamespaceConfig {
+            namespace: NamespaceSettings {
+                name: "${SET_VAR}".to_string(),
+                description: "${UNSET_VAR:-default_description}".to_string(),
+            },
+            interfaces: InterfaceConfig {
+                move_interfaces: vec!["${UNSET_VAR:-eth0}".to_string()],
+                virtual_interfaces: vec![],
+            },
+            routing: RoutingConfig {
+                default_gateway: Some("${GATEWAY:-192.168.1.1}".to_string()),
+                routes: vec![],
+            },
+            dns: DnsConfig {
+                servers: vec!["${DNS:-8.8.8.8}".to_string()],
+                search: vec![],
+            },
+            environment: env_vars,
+        };
+
+        // Perform substitution
+        config.substitute_environment_variables().unwrap();
+
+        // Verify substitutions with defaults
+        assert_eq!(config.namespace.name, "set_value");
+        assert_eq!(config.namespace.description, "default_description");
+        assert_eq!(config.interfaces.move_interfaces[0], "eth0");
+        assert_eq!(config.routing.default_gateway.as_ref().unwrap(), "192.168.1.1");
+        assert_eq!(config.dns.servers[0], "8.8.8.8");
+    }
+
+    #[test]
+    fn test_environment_variable_substitution_errors() {
+        let env_vars = HashMap::new();
+
+        let mut config = NamespaceConfig {
+            namespace: NamespaceSettings {
+                name: "${MISSING_VAR}".to_string(), // No default provided
+                description: "Test".to_string(),
+            },
+            interfaces: InterfaceConfig::default(),
+            routing: RoutingConfig::default(),
+            dns: DnsConfig::default(),
+            environment: env_vars,
+        };
+
+        // Should fail with missing variable
+        let result = config.substitute_environment_variables();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Environment variable 'MISSING_VAR' not found"));
+    }
+
+    #[test]
+    fn test_environment_variable_substitution_system_env() {
+        // Set a system environment variable
+        std::env::set_var("SEGWIRE_TEST_SYSTEM_VAR", "system_value");
+
+        let env_vars = HashMap::new();
+        let mut config = NamespaceConfig {
+            namespace: NamespaceSettings {
+                name: "${SEGWIRE_TEST_SYSTEM_VAR}".to_string(),
+                description: "Test".to_string(),
+            },
+            interfaces: InterfaceConfig::default(),
+            routing: RoutingConfig::default(),
+            dns: DnsConfig::default(),
+            environment: env_vars,
+        };
+
+        // Should use system environment variable
+        config.substitute_environment_variables().unwrap();
+        assert_eq!(config.namespace.name, "system_value");
+
+        // Clean up
+        std::env::remove_var("SEGWIRE_TEST_SYSTEM_VAR");
+    }
+
+    #[test]
+    fn test_environment_variable_substitution_precedence() {
+        // Set a system environment variable
+        std::env::set_var("SEGWIRE_TEST_PRECEDENCE_VAR", "system_value");
+
+        // Config environment should take precedence
+        let mut env_vars = HashMap::new();
+        env_vars.insert("SEGWIRE_TEST_PRECEDENCE_VAR".to_string(), "config_value".to_string());
+
+        let mut config = NamespaceConfig {
+            namespace: NamespaceSettings {
+                name: "${SEGWIRE_TEST_PRECEDENCE_VAR}".to_string(),
+                description: "Test".to_string(),
+            },
+            interfaces: InterfaceConfig::default(),
+            routing: RoutingConfig::default(),
+            dns: DnsConfig::default(),
+            environment: env_vars,
+        };
+
+        // Should use config environment variable over system
+        config.substitute_environment_variables().unwrap();
+        assert_eq!(config.namespace.name, "config_value");
+
+        // Clean up
+        std::env::remove_var("SEGWIRE_TEST_PRECEDENCE_VAR");
     }
 }

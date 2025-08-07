@@ -174,6 +174,110 @@ pub fn namespace_matches_prefix(prefix: &str, full_name: &str) -> bool {
     full_name.starts_with(&expected_prefix)
 }
 
+/// Substitute environment variables in a string value
+/// 
+/// Supports the following formats:
+/// - ${VAR_NAME} - substitutes with environment variable or config environment value
+/// - ${VAR_NAME:-default} - substitutes with default if variable is not set
+/// - ${VAR_NAME:+alternate} - substitutes with alternate if variable is set
+pub fn substitute_env_vars(input: &str, config_env: &std::collections::HashMap<String, String>) -> SegwireResult<String> {
+    use crate::error::ConfigError;
+    
+    let mut result = input.to_string();
+    let var_pattern = Regex::new(r"\$\{([^}]+)\}").unwrap();
+    
+    // Keep substituting until no more variables are found (handles nested substitution)
+    let mut changed = true;
+    let mut iteration_count = 0;
+    const MAX_ITERATIONS: usize = 10; // Prevent infinite loops
+    
+    while changed && iteration_count < MAX_ITERATIONS {
+        changed = false;
+        iteration_count += 1;
+        
+        // Find all variable references in the current result
+        let matches: Vec<_> = var_pattern.find_iter(&result).map(|m| (m.start(), m.end(), m.as_str().to_string())).collect();
+        
+        // Process matches in reverse order to avoid offset issues
+        for (start, end, full_match) in matches.iter().rev() {
+            let var_spec = &full_match[2..full_match.len()-1]; // Remove ${ and }
+            
+            let substitution = resolve_variable_spec(var_spec, config_env)?;
+            
+            // Replace this occurrence
+            result.replace_range(*start..*end, &substitution);
+            changed = true;
+        }
+    }
+    
+    if iteration_count >= MAX_ITERATIONS {
+        return Err(SegwireError::Config(ConfigError::EnvSubstitution(
+            "Maximum substitution iterations exceeded - possible circular reference".to_string()
+        )));
+    }
+    
+    Ok(result)
+}
+
+/// Resolve a variable specification (the part inside ${})
+fn resolve_variable_spec(spec: &str, config_env: &std::collections::HashMap<String, String>) -> SegwireResult<String> {
+    use crate::error::ConfigError;
+    
+    // Handle default value syntax: VAR_NAME:-default
+    if let Some(colon_pos) = spec.find(":-") {
+        let var_name = &spec[..colon_pos];
+        let default_value = &spec[colon_pos + 2..];
+        
+        if let Some(value) = get_variable_value(var_name, config_env) {
+            if value.is_empty() {
+                Ok(default_value.to_string())
+            } else {
+                Ok(value)
+            }
+        } else {
+            Ok(default_value.to_string())
+        }
+    }
+    // Handle alternate value syntax: VAR_NAME:+alternate
+    else if let Some(colon_pos) = spec.find(":+") {
+        let var_name = &spec[..colon_pos];
+        let alternate_value = &spec[colon_pos + 2..];
+        
+        if let Some(value) = get_variable_value(var_name, config_env) {
+            if !value.is_empty() {
+                Ok(alternate_value.to_string())
+            } else {
+                Ok(String::new())
+            }
+        } else {
+            Ok(String::new())
+        }
+    }
+    // Simple variable reference: VAR_NAME
+    else {
+        let var_name = spec;
+        
+        if let Some(value) = get_variable_value(var_name, config_env) {
+            Ok(value)
+        } else {
+            Err(SegwireError::Config(ConfigError::EnvSubstitution(
+                format!("Environment variable '{}' not found", var_name)
+            )))
+        }
+    }
+}
+
+/// Get variable value from config environment or system environment
+fn get_variable_value(var_name: &str, config_env: &std::collections::HashMap<String, String>) -> Option<String> {
+    // First check config environment variables
+    if let Some(value) = config_env.get(var_name) {
+        return Some(value.clone());
+    }
+    
+    // Then check system environment variables
+    std::env::var(var_name).ok()
+}
+
 /// Validate domain name format
 pub fn validate_domain_name(domain: &str) -> SegwireResult<()> {
     if domain.is_empty() {
@@ -293,5 +397,151 @@ mod tests {
         // Test very long prefix
         let long_prefix = "a".repeat(33);
         assert!(validate_namespace_prefix(&long_prefix).is_err());
+    }
+
+    #[test]
+    fn test_substitute_env_vars_simple() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("TEST_VAR".to_string(), "test_value".to_string());
+        
+        // Simple substitution
+        let result = substitute_env_vars("${TEST_VAR}", &config_env).unwrap();
+        assert_eq!(result, "test_value");
+        
+        // Substitution within text
+        let result = substitute_env_vars("prefix-${TEST_VAR}-suffix", &config_env).unwrap();
+        assert_eq!(result, "prefix-test_value-suffix");
+        
+        // Multiple substitutions
+        config_env.insert("VAR2".to_string(), "value2".to_string());
+        let result = substitute_env_vars("${TEST_VAR}-${VAR2}", &config_env).unwrap();
+        assert_eq!(result, "test_value-value2");
+        
+        // No substitution needed
+        let result = substitute_env_vars("no_variables_here", &config_env).unwrap();
+        assert_eq!(result, "no_variables_here");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_default_values() {
+        let config_env = std::collections::HashMap::new();
+        
+        // Default value when variable not set
+        let result = substitute_env_vars("${MISSING_VAR:-default_value}", &config_env).unwrap();
+        assert_eq!(result, "default_value");
+        
+        // Default value when variable is empty
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("EMPTY_VAR".to_string(), "".to_string());
+        let result = substitute_env_vars("${EMPTY_VAR:-default_value}", &config_env).unwrap();
+        assert_eq!(result, "default_value");
+        
+        // No default used when variable has value
+        config_env.insert("SET_VAR".to_string(), "actual_value".to_string());
+        let result = substitute_env_vars("${SET_VAR:-default_value}", &config_env).unwrap();
+        assert_eq!(result, "actual_value");
+        
+        // Complex default value
+        let result = substitute_env_vars("${MISSING_VAR:-complex-default-123}", &config_env).unwrap();
+        assert_eq!(result, "complex-default-123");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_alternate_values() {
+        let mut config_env = std::collections::HashMap::new();
+        
+        // Alternate value when variable is set
+        config_env.insert("SET_VAR".to_string(), "original_value".to_string());
+        let result = substitute_env_vars("${SET_VAR:+alternate_value}", &config_env).unwrap();
+        assert_eq!(result, "alternate_value");
+        
+        // No alternate when variable not set
+        let result = substitute_env_vars("${MISSING_VAR:+alternate_value}", &config_env).unwrap();
+        assert_eq!(result, "");
+        
+        // No alternate when variable is empty
+        config_env.insert("EMPTY_VAR".to_string(), "".to_string());
+        let result = substitute_env_vars("${EMPTY_VAR:+alternate_value}", &config_env).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_system_env() {
+        let config_env = std::collections::HashMap::new();
+        
+        // Set a system environment variable for testing
+        std::env::set_var("SEGWIRE_TEST_VAR", "system_value");
+        
+        let result = substitute_env_vars("${SEGWIRE_TEST_VAR}", &config_env).unwrap();
+        assert_eq!(result, "system_value");
+        
+        // Config environment takes precedence over system environment
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("SEGWIRE_TEST_VAR".to_string(), "config_value".to_string());
+        let result = substitute_env_vars("${SEGWIRE_TEST_VAR}", &config_env).unwrap();
+        assert_eq!(result, "config_value");
+        
+        // Clean up
+        std::env::remove_var("SEGWIRE_TEST_VAR");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_nested() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("INNER_VAR".to_string(), "inner_value".to_string());
+        config_env.insert("OUTER_VAR".to_string(), "${INNER_VAR}".to_string());
+        
+        // Nested substitution
+        let result = substitute_env_vars("${OUTER_VAR}", &config_env).unwrap();
+        assert_eq!(result, "inner_value");
+        
+        // More complex nesting
+        config_env.insert("PREFIX".to_string(), "test".to_string());
+        config_env.insert("SUFFIX".to_string(), "app".to_string());
+        config_env.insert("FULL_NAME".to_string(), "${PREFIX}-${SUFFIX}".to_string());
+        let result = substitute_env_vars("namespace-${FULL_NAME}", &config_env).unwrap();
+        assert_eq!(result, "namespace-test-app");
+    }
+
+    #[test]
+    fn test_substitute_env_vars_errors() {
+        let config_env = std::collections::HashMap::new();
+        
+        // Missing variable without default
+        let result = substitute_env_vars("${MISSING_VAR}", &config_env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Environment variable 'MISSING_VAR' not found"));
+        
+        // Test circular reference protection
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("VAR1".to_string(), "${VAR2}".to_string());
+        config_env.insert("VAR2".to_string(), "${VAR1}".to_string());
+        let result = substitute_env_vars("${VAR1}", &config_env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Maximum substitution iterations exceeded"));
+    }
+
+    #[test]
+    fn test_substitute_env_vars_edge_cases() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("EMPTY".to_string(), "".to_string());
+        config_env.insert("SPACES".to_string(), "  value with spaces  ".to_string());
+        config_env.insert("SPECIAL_CHARS".to_string(), "value-with_special.chars123".to_string());
+        
+        // Empty variable
+        let result = substitute_env_vars("${EMPTY}", &config_env).unwrap();
+        assert_eq!(result, "");
+        
+        // Variable with spaces
+        let result = substitute_env_vars("${SPACES}", &config_env).unwrap();
+        assert_eq!(result, "  value with spaces  ");
+        
+        // Variable with special characters
+        let result = substitute_env_vars("${SPECIAL_CHARS}", &config_env).unwrap();
+        assert_eq!(result, "value-with_special.chars123");
+        
+        // Multiple variables with different formats
+        let result = substitute_env_vars("${EMPTY:-default}-${SPACES}-${SPECIAL_CHARS:+alt}", &config_env).unwrap();
+        assert_eq!(result, "default-  value with spaces  -alt");
     }
 }

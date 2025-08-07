@@ -19,7 +19,7 @@
     - Implement namespace name prefix validation
     - _Requirements: 2.3, 2.4, 2.5, 2.6_
 
-  - [ ] 2.3 Add environment variable substitution support
+  - [x] 2.3 Add environment variable substitution support
     - Implement environment variable parsing in TOML values
     - Add runtime variable resolution functionality
     - Write unit tests for variable substitution
