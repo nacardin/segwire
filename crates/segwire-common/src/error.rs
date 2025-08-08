@@ -94,5 +94,19 @@ impl SegwireError {
     }
 }
 
+impl From<crate::dbus::DbusError> for SegwireError {
+    fn from(error: crate::dbus::DbusError) -> Self {
+        match error {
+            crate::dbus::DbusError::ConfigurationError(msg) => SegwireError::Validation(msg),
+            crate::dbus::DbusError::NetworkError(msg) => SegwireError::Network(msg),
+            crate::dbus::DbusError::PermissionDenied(msg) => SegwireError::Permission(msg),
+            crate::dbus::DbusError::NamespaceNotFound(msg) => SegwireError::Network(msg),
+            crate::dbus::DbusError::InvalidState(msg) => SegwireError::Validation(msg),
+            crate::dbus::DbusError::SystemError(msg) => SegwireError::System(std::io::Error::new(std::io::ErrorKind::Other, msg)),
+            crate::dbus::DbusError::InternalError(msg) => SegwireError::Network(msg),
+        }
+    }
+}
+
 /// Convenience type alias for Results with SegwireError
 pub type SegwireResult<T> = Result<T, SegwireError>;

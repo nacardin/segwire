@@ -128,9 +128,19 @@ impl ConfigManager {
         &self.daemon_config.daemon.namespace_prefix
     }
     
+    /// Get the namespace prefix for this daemon instance (alternative method name)
+    pub fn get_namespace_prefix(&self) -> String {
+        self.daemon_config.daemon.namespace_prefix.clone()
+    }
+    
     /// Get the configuration directory path
     pub fn config_directory(&self) -> &Path {
         &self.daemon_config.daemon.config_dir
+    }
+    
+    /// Get the configuration directory path (alternative method name)
+    pub fn get_config_dir(&self) -> PathBuf {
+        self.daemon_config.daemon.config_dir.clone()
     }
     
     /// Get all currently loaded namespace configurations

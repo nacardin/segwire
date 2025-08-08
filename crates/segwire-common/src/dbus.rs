@@ -203,6 +203,12 @@ pub enum DbusError {
     InternalError(String),
 }
 
+impl std::fmt::Display for DbusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
 impl DbusError {
     /// Get the D-Bus error name for this error type
     pub fn error_name(&self) -> &'static str {

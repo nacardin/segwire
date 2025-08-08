@@ -76,20 +76,20 @@
     - Create route validation and conflict detection
     - _Requirements: 2.5, 2.6_
 
-- [ ] 6. Build daemon D-Bus service implementation
-  - [ ] 6.1 Create D-Bus service registration and setup
+- [x] 6. Build daemon D-Bus service implementation
+  - [x] 6.1 Create D-Bus service registration and setup
     - Implement service registration on system bus
     - Add PolicyKit integration for authorization
     - Create method call dispatcher and error handling
     - _Requirements: 6.1, 7.3, 7.4_
 
-  - [ ] 6.2 Implement namespace management D-Bus methods
+  - [x] 6.2 Implement namespace management D-Bus methods
     - Add ListNamespaces method with status information
     - Implement GetNamespaceStatus with detailed information
     - Create CreateNamespace and DeleteNamespace methods
     - _Requirements: 3.1, 3.2, 4.1, 4.2_
 
-  - [ ] 6.3 Add configuration management D-Bus methods
+  - [x] 6.3 Add configuration management D-Bus methods
     - Implement ReloadConfiguration method
     - Add ValidateConfiguration method with error reporting
     - Create progress signal emission for long operations
