@@ -1,6 +1,7 @@
 mod config;
 mod dbus_service;
 mod event_loop;
+mod namespace_state;
 mod policykit;
 
 use event_loop::DaemonEventLoop;

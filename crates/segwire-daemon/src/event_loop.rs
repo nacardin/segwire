@@ -8,6 +8,7 @@
 
 use crate::config::{ConfigManager, ConfigFileEvent};
 use crate::dbus_service::DbusService;
+use crate::namespace_state::NamespaceStateManager;
 use segwire_common::SegwireResult;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -36,10 +37,12 @@ fn check_capabilities() -> SegwireResult<()> {
 /// This struct coordinates between different daemon components:
 /// - Configuration file monitoring with io_uring-based file watching
 /// - D-Bus service for CLI communication
+/// - Namespace state management and synchronization
 /// - Graceful shutdown handling with cleanup
 pub struct DaemonEventLoop {
     config_manager: Arc<Mutex<ConfigManager>>,
     dbus_service: Arc<DbusService>,
+    state_manager: Arc<Mutex<NamespaceStateManager>>,
     shutdown_signal: Arc<AtomicBool>,
 }
 
@@ -71,12 +74,17 @@ impl DaemonEventLoop {
         let dbus_service = Arc::new(DbusService::new(config_dir, namespace_prefix).await?);
         info!("D-Bus service initialized successfully!");
 
+        // Initialize namespace state manager
+        let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new().await?));
+        info!("Namespace state manager initialized successfully!");
+
         // Create shutdown signal
         let shutdown_signal = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
             config_manager,
             dbus_service,
+            state_manager,
             shutdown_signal,
         })
     }
@@ -113,6 +121,9 @@ impl DaemonEventLoop {
         // Spawn D-Bus service task
         let dbus_task = self.spawn_dbus_service_task();
 
+        // Spawn state synchronization task
+        let state_task = self.spawn_state_synchronization_task();
+
         // Spawn signal handling task
         let signal_task = self.spawn_signal_handling_task();
 
@@ -137,6 +148,11 @@ impl DaemonEventLoop {
 
             if dbus_task.is_finished() {
                 error!("D-Bus service task terminated unexpectedly");
+                break;
+            }
+
+            if state_task.is_finished() {
+                error!("State synchronization task terminated unexpectedly");
                 break;
             }
 
@@ -165,6 +181,7 @@ impl DaemonEventLoop {
         config_event_receiver: std::sync::mpsc::Receiver<ConfigFileEvent>,
     ) -> monoio::task::JoinHandle<()> {
         let config_manager = self.config_manager.clone();
+        let state_manager = self.state_manager.clone();
         let dbus_service = self.dbus_service.clone();
         let shutdown_signal = self.shutdown_signal.clone();
 
@@ -195,14 +212,37 @@ impl DaemonEventLoop {
                             }
                         };
 
-                        // Emit D-Bus signals for affected namespaces
-                        for namespace in affected_namespaces {
-                            if let Err(e) = dbus_service.emit_namespace_status_changed(
-                                &namespace,
-                                "unknown",
-                                "updated"
-                            ).await {
-                                warn!("Failed to emit namespace status change signal: {}", e);
+                        // Trigger immediate state synchronization for affected namespaces
+                        if !affected_namespaces.is_empty() {
+                            debug!("Configuration change detected, triggering state synchronization");
+                            
+                            let config_mgr = config_manager.lock().unwrap();
+                            let mut state_mgr = state_manager.lock().unwrap();
+                            
+                            match state_mgr.force_sync(&config_mgr).await {
+                                Ok(result) => {
+                                    // Emit D-Bus signals for state changes
+                                    for namespace in &result.created {
+                                        if let Err(e) = dbus_service.emit_namespace_created(namespace, "config_change").await {
+                                            warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
+                                        }
+                                    }
+                                    
+                                    for namespace in &result.deleted {
+                                        if let Err(e) = dbus_service.emit_namespace_deleted(namespace, "config_change").await {
+                                            warn!("Failed to emit namespace deleted signal for {}: {}", namespace, e);
+                                        }
+                                    }
+                                    
+                                    for namespace in &result.updated {
+                                        if let Err(e) = dbus_service.emit_namespace_status_changed(namespace, "unknown", "updated").await {
+                                            warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to synchronize state after configuration change: {}", e);
+                                }
                             }
                         }
                     }
@@ -248,6 +288,121 @@ impl DaemonEventLoop {
             }
 
             info!("D-Bus service task completed");
+        })
+    }
+
+    /// Spawn state synchronization task
+    /// 
+    /// This task periodically synchronizes the in-memory namespace state
+    /// with the actual system state and configuration files.
+    fn spawn_state_synchronization_task(&self) -> monoio::task::JoinHandle<()> {
+        let config_manager = self.config_manager.clone();
+        let state_manager = self.state_manager.clone();
+        let dbus_service = self.dbus_service.clone();
+        let shutdown_signal = self.shutdown_signal.clone();
+
+        monoio::spawn(async move {
+            info!("State synchronization task started");
+
+            // Perform initial state synchronization
+            {
+                let config_mgr = config_manager.lock().unwrap();
+                let mut state_mgr = state_manager.lock().unwrap();
+                
+                match state_mgr.force_sync(&config_mgr).await {
+                    Ok(result) => {
+                        info!("Initial state synchronization completed: {} created, {} updated, {} conflicts", 
+                              result.created.len(), result.updated.len(), result.conflicts.len());
+                        
+                        // Emit D-Bus signals for created namespaces
+                        for namespace in &result.created {
+                            if let Err(e) = dbus_service.emit_namespace_created(namespace, "initial_sync").await {
+                                warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
+                            }
+                        }
+                        
+                        // Log conflicts for manual resolution
+                        for conflict in &result.conflicts {
+                            warn!("State conflict detected: {} - {} (resolution: {:?})", 
+                                  conflict.namespace_name, conflict.description, conflict.resolution);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Initial state synchronization failed: {}", e);
+                    }
+                }
+            }
+
+            let mut maintenance_counter = 0;
+
+            loop {
+                // Check for shutdown signal
+                if shutdown_signal.load(Ordering::Relaxed) {
+                    debug!("State synchronization task received shutdown signal");
+                    break;
+                }
+
+                // Check if synchronization is needed
+                let needs_sync = {
+                    let state_mgr = state_manager.lock().unwrap();
+                    state_mgr.needs_sync()
+                };
+
+                if needs_sync {
+                    debug!("Performing periodic state synchronization");
+                    
+                    let config_mgr = config_manager.lock().unwrap();
+                    let mut state_mgr = state_manager.lock().unwrap();
+                    
+                    match state_mgr.synchronize_state(&config_mgr).await {
+                        Ok(result) => {
+                            if !result.created.is_empty() || !result.updated.is_empty() || 
+                               !result.deleted.is_empty() || !result.conflicts.is_empty() {
+                                info!("State synchronization completed: {} created, {} updated, {} deleted, {} conflicts", 
+                                      result.created.len(), result.updated.len(), result.deleted.len(), result.conflicts.len());
+                                
+                                // Emit D-Bus signals for state changes
+                                for namespace in &result.created {
+                                    if let Err(e) = dbus_service.emit_namespace_created(namespace, "sync").await {
+                                        warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
+                                    }
+                                }
+                                
+                                for namespace in &result.deleted {
+                                    if let Err(e) = dbus_service.emit_namespace_deleted(namespace, "sync").await {
+                                        warn!("Failed to emit namespace deleted signal for {}: {}", namespace, e);
+                                    }
+                                }
+                                
+                                for namespace in &result.updated {
+                                    if let Err(e) = dbus_service.emit_namespace_status_changed(namespace, "unknown", "updated").await {
+                                        warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("State synchronization failed: {}", e);
+                        }
+                    }
+                }
+
+                // Perform maintenance every 10 sync cycles (approximately every 5 minutes)
+                maintenance_counter += 1;
+                if maintenance_counter >= 10 {
+                    maintenance_counter = 0;
+                    
+                    let mut state_mgr = state_manager.lock().unwrap();
+                    if let Err(e) = state_mgr.perform_maintenance().await {
+                        warn!("State maintenance failed: {}", e);
+                    }
+                }
+
+                // Sleep for 30 seconds before next check
+                monoio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+
+            info!("State synchronization task completed");
         })
     }
 
