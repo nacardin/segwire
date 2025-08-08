@@ -33,12 +33,44 @@ pub struct DaemonSettings {
     pub cleanup_on_shutdown: bool,
     
     /// Logging configuration
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// Logging configuration settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Log level (trace, debug, info, warn, error)
     #[serde(default = "default_log_level")]
-    pub log_level: String,
+    pub level: String,
     
-    /// Log target (syslog, stdout, file)
-    #[serde(default = "default_log_target")]
-    pub log_target: String,
+    /// Include timestamps in log output
+    #[serde(default = "default_with_timestamps")]
+    pub with_timestamps: bool,
+    
+    /// Include thread names in log output
+    #[serde(default = "default_with_thread_names")]
+    pub with_thread_names: bool,
+    
+    /// Include file and line information
+    #[serde(default = "default_with_file_line")]
+    pub with_file_line: bool,
+    
+    /// Include span information for tracing
+    #[serde(default = "default_with_spans")]
+    pub with_spans: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            with_timestamps: default_with_timestamps(),
+            with_thread_names: default_with_thread_names(),
+            with_file_line: default_with_file_line(),
+            with_spans: default_with_spans(),
+        }
+    }
 }
 
 /// D-Bus service settings
@@ -138,8 +170,20 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_log_target() -> String {
-    "syslog".to_string()
+fn default_with_timestamps() -> bool {
+    true
+}
+
+fn default_with_thread_names() -> bool {
+    true
+}
+
+fn default_with_file_line() -> bool {
+    false
+}
+
+fn default_with_spans() -> bool {
+    false
 }
 
 fn default_service_name() -> String {
@@ -365,6 +409,22 @@ impl DnsConfig {
 
 
 
+impl LoggingConfig {
+    /// Validate logging configuration
+    pub fn validate(&self) -> SegwireResult<()> {
+        // Validate log level
+        let valid_log_levels = ["error", "warn", "info", "debug", "trace"];
+        if !valid_log_levels.contains(&self.level.as_str()) {
+            return Err(ConfigError::InvalidValue {
+                field: "logging.level".to_string(),
+                value: self.level.clone(),
+            }.into());
+        }
+        
+        Ok(())
+    }
+}
+
 impl DaemonConfig {
     /// Load daemon configuration from TOML file
     pub fn from_file(path: &std::path::Path) -> SegwireResult<Self> {
@@ -390,23 +450,8 @@ impl DaemonConfig {
             }.into());
         }
         
-        // Validate log level
-        let valid_log_levels = ["error", "warn", "info", "debug", "trace"];
-        if !valid_log_levels.contains(&self.daemon.log_level.as_str()) {
-            return Err(ConfigError::InvalidValue {
-                field: "log_level".to_string(),
-                value: self.daemon.log_level.clone(),
-            }.into());
-        }
-        
-        // Validate log target
-        let valid_log_targets = ["syslog", "stdout", "stderr", "file"];
-        if !valid_log_targets.contains(&self.daemon.log_target.as_str()) {
-            return Err(ConfigError::InvalidValue {
-                field: "log_target".to_string(),
-                value: self.daemon.log_target.clone(),
-            }.into());
-        }
+        // Validate logging configuration
+        self.daemon.logging.validate()?;
         
         // Validate D-Bus service name format
         if !self.dbus.service_name.contains('.') || self.dbus.service_name.starts_with('.') {
@@ -521,8 +566,13 @@ mod tests {
                 namespace_prefix: "test".to_string(),
                 config_dir: "/tmp".into(),
                 cleanup_on_shutdown: true,
-                log_level: "debug".to_string(),
-                log_target: "stdout".to_string(),
+                logging: LoggingConfig {
+                    level: "debug".to_string(),
+                    with_timestamps: true,
+                    with_thread_names: true,
+                    with_file_line: false,
+                    with_spans: false,
+                },
             },
             dbus: DBusSettings {
                 service_name: "org.test.Service".to_string(),
@@ -604,8 +654,7 @@ config_dir = "/tmp"
         
         // Check defaults are applied
         assert_eq!(config.daemon.cleanup_on_shutdown, true);
-        assert_eq!(config.daemon.log_level, "info");
-        assert_eq!(config.daemon.log_target, "syslog");
+        assert_eq!(config.daemon.logging.level, "info");
         assert_eq!(config.dbus.service_name, "org.segwire.NamespaceManager");
         assert_eq!(config.dbus.object_path, "/org/segwire/NamespaceManager");
     }
@@ -617,8 +666,7 @@ config_dir = "/tmp"
                 namespace_prefix: "".to_string(), // Invalid empty prefix
                 config_dir: "/tmp".into(),
                 cleanup_on_shutdown: true,
-                log_level: "info".to_string(),
-                log_target: "syslog".to_string(),
+                logging: LoggingConfig::default(),
             },
             dbus: DBusSettings {
                 service_name: "org.test.Service".to_string(),
@@ -634,11 +682,11 @@ config_dir = "/tmp"
         assert!(config.validate().is_ok());
 
         // Test invalid log level
-        config.daemon.log_level = "invalid".to_string();
+        config.daemon.logging.level = "invalid".to_string();
         assert!(config.validate().is_err());
 
         // Fix log level
-        config.daemon.log_level = "debug".to_string();
+        config.daemon.logging.level = "debug".to_string();
         assert!(config.validate().is_ok());
 
         // Test invalid service name

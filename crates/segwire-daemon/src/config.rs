@@ -227,14 +227,10 @@ impl ConfigManager {
     
     /// Get the configured log level
     pub fn log_level(&self) -> &str {
-        &self.daemon_config.daemon.log_level
+        &self.daemon_config.daemon.logging.level
     }
     
-    /// Get the configured log target
-    pub fn log_target(&self) -> &str {
-        &self.daemon_config.daemon.log_target
-    }
-    
+
     /// Get D-Bus service configuration
     pub fn dbus_service_name(&self) -> &str {
         &self.daemon_config.dbus.service_name

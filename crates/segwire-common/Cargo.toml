@@ -27,3 +27,7 @@ nix = { workspace = true }
 
 # Async runtime
 monoio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -11,7 +11,8 @@ use segwire_common::dbus::{
     interface, method_signatures, DbusError, NamespaceState, OperationResult,
     ValidationResult, interface_helpers,
 };
-use segwire_common::error::SegwireError;
+use segwire_common::error::{SegwireError, ErrorContext};
+use segwire_common::{LogContext, log_info, log_warn, log_error, log_debug};
 use tracing::{debug, info, warn};
 use zbus::{Connection, ConnectionBuilder, SignalContext};
 
@@ -35,7 +36,13 @@ impl DbusService {
         config_dir: std::path::PathBuf,
         namespace_prefix: String,
     ) -> Result<Self, SegwireError> {
-        info!("Initializing D-Bus service");
+        let ctx = LogContext::new("dbus_service_initialization")
+            .with_field("service_name", interface::SERVICE_NAME)
+            .with_field("object_path", interface::OBJECT_PATH)
+            .with_field("namespace_prefix", namespace_prefix.clone())
+            .with_field("config_dir", config_dir.display().to_string());
+
+        log_info!(ctx, "Initializing D-Bus service");
 
         // Create namespace manager
         let namespace_manager = Arc::new(Mutex::new(NamespaceManager {
@@ -45,16 +52,42 @@ impl DbusService {
         }));
 
         // Build D-Bus connection with service registration
-        let connection = ConnectionBuilder::system()?
-            .name(interface::SERVICE_NAME)?
+        let connection = ConnectionBuilder::system()
+            .map_err(|e| {
+                let error_ctx = ErrorContext::new("dbus_connection_builder")
+                    .with_field("service_name", interface::SERVICE_NAME)
+                    .with_remediation("Ensure D-Bus system bus is available")
+                    .with_remediation("Check that the daemon has permission to access the system bus");
+                SegwireError::DBus(e).with_context(error_ctx).log_and_return()
+            })?
+            .name(interface::SERVICE_NAME)
+            .map_err(|e| {
+                let error_ctx = ErrorContext::new("dbus_service_name_registration")
+                    .with_field("service_name", interface::SERVICE_NAME)
+                    .with_remediation("Ensure no other instance of segwire-daemon is running")
+                    .with_remediation("Check D-Bus service configuration");
+                SegwireError::DBus(e).with_context(error_ctx).log_and_return()
+            })?
             .serve_at(interface::OBJECT_PATH, NamespaceManagerInterface {
                 namespace_manager: namespace_manager.clone(),
                 daemon_start_time: SystemTime::now(),
+            })
+            .map_err(|e| {
+                let error_ctx = ErrorContext::new("dbus_object_registration")
+                    .with_field("object_path", interface::OBJECT_PATH)
+                    .with_remediation("Check D-Bus object path permissions");
+                SegwireError::DBus(e).with_context(error_ctx).log_and_return()
             })?
             .build()
-            .await?;
+            .await
+            .map_err(|e| {
+                let error_ctx = ErrorContext::new("dbus_connection_build")
+                    .with_remediation("Ensure D-Bus system bus is running")
+                    .with_remediation("Check system D-Bus configuration");
+                SegwireError::DBus(e).with_context(error_ctx).log_and_return()
+            })?;
 
-        info!("D-Bus service registered at {}", interface::SERVICE_NAME);
+        log_info!(ctx, "D-Bus service registered successfully");
 
         Ok(Self {
             connection,

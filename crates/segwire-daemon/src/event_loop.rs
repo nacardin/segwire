@@ -9,7 +9,7 @@
 use crate::config::{ConfigManager, ConfigFileEvent};
 use crate::dbus_service::DbusService;
 use crate::namespace_state::NamespaceStateManager;
-use segwire_common::SegwireResult;
+use segwire_common::{SegwireResult, LogContext, log_info, log_warn, log_error, log_debug};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,14 +55,17 @@ impl DaemonEventLoop {
     /// # Returns
     /// A new `DaemonEventLoop` instance ready to run
     pub async fn new(config_path: PathBuf) -> SegwireResult<Self> {
-        info!("Initializing daemon event loop");
+        let ctx = LogContext::new("daemon_initialization")
+            .with_config_path(config_path.clone());
+        
+        log_info!(ctx, "Initializing daemon event loop");
 
         // Check for required capabilities
         check_capabilities()?;
 
         // Initialize configuration manager
-        let config_manager = Arc::new(Mutex::new(ConfigManager::new(config_path)?));
-        info!("Configuration loaded successfully!");
+        let config_manager = Arc::new(Mutex::new(ConfigManager::new(config_path.clone())?));
+        log_info!(ctx, "Configuration loaded successfully");
 
         // Get configuration values for D-Bus service initialization
         let (config_dir, namespace_prefix) = {
@@ -70,13 +73,16 @@ impl DaemonEventLoop {
             (manager.get_config_dir(), manager.get_namespace_prefix())
         };
 
+        let ctx = ctx.with_field("namespace_prefix", namespace_prefix.clone())
+            .with_field("config_dir", config_dir.display().to_string());
+
         // Initialize D-Bus service
         let dbus_service = Arc::new(DbusService::new(config_dir, namespace_prefix).await?);
-        info!("D-Bus service initialized successfully!");
+        log_info!(ctx, "D-Bus service initialized successfully");
 
         // Initialize namespace state manager
         let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new().await?));
-        info!("Namespace state manager initialized successfully!");
+        log_info!(ctx, "Namespace state manager initialized successfully");
 
         // Create shutdown signal
         let shutdown_signal = Arc::new(AtomicBool::new(false));

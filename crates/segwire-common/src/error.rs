@@ -3,7 +3,9 @@
 //! Provides comprehensive error handling with categorized error types
 //! and utilities for error propagation and recovery.
 
+use std::collections::HashMap;
 use thiserror::Error;
+use tracing::error;
 
 /// Main error type for segwire operations
 #[derive(Debug, Error)]
@@ -68,6 +70,58 @@ pub enum NetworkError {
     DnsError(String),
 }
 
+/// Error context for detailed error reporting
+#[derive(Debug, Clone)]
+pub struct ErrorContext {
+    /// Operation that was being performed
+    pub operation: String,
+    /// Namespace involved (if applicable)
+    pub namespace: Option<String>,
+    /// Configuration file path (if applicable)
+    pub config_path: Option<std::path::PathBuf>,
+    /// Additional context fields
+    pub fields: HashMap<String, String>,
+    /// Suggested remediation steps
+    pub remediation: Vec<String>,
+}
+
+impl ErrorContext {
+    /// Create a new error context
+    pub fn new(operation: impl Into<String>) -> Self {
+        Self {
+            operation: operation.into(),
+            namespace: None,
+            config_path: None,
+            fields: HashMap::new(),
+            remediation: Vec::new(),
+        }
+    }
+
+    /// Add namespace context
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = Some(namespace.into());
+        self
+    }
+
+    /// Add configuration file context
+    pub fn with_config_path(mut self, path: std::path::PathBuf) -> Self {
+        self.config_path = Some(path);
+        self
+    }
+
+    /// Add a custom field
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
+    }
+
+    /// Add a remediation step
+    pub fn with_remediation(mut self, step: impl Into<String>) -> Self {
+        self.remediation.push(step.into());
+        self
+    }
+}
+
 impl SegwireError {
     /// Check if the error is recoverable and operations can continue
     pub fn is_recoverable(&self) -> bool {
@@ -91,6 +145,126 @@ impl SegwireError {
             SegwireError::System(e) => format!("System error: {}", e),
             SegwireError::Validation(msg) => format!("Validation failed: {}", msg),
         }
+    }
+
+    /// Get error category for structured logging
+    pub fn category(&self) -> &'static str {
+        match self {
+            SegwireError::Config(_) => "configuration",
+            SegwireError::Network(_) => "network",
+            SegwireError::DBus(_) => "dbus",
+            SegwireError::Permission(_) => "permission",
+            SegwireError::System(_) => "system",
+            SegwireError::Validation(_) => "validation",
+        }
+    }
+
+    /// Get suggested remediation steps
+    pub fn remediation_steps(&self) -> Vec<String> {
+        match self {
+            SegwireError::Config(ConfigError::InvalidToml(_)) => vec![
+                "Check TOML syntax using a validator".to_string(),
+                "Ensure all required fields are present".to_string(),
+                "Verify file encoding is UTF-8".to_string(),
+            ],
+            SegwireError::Config(ConfigError::MissingField(field)) => vec![
+                format!("Add the required field '{}' to your configuration", field),
+                "Refer to the configuration documentation for field requirements".to_string(),
+            ],
+            SegwireError::Network(_) => vec![
+                "Check network interface availability".to_string(),
+                "Verify namespace doesn't already exist".to_string(),
+                "Ensure sufficient network privileges".to_string(),
+            ],
+            SegwireError::Permission(_) => vec![
+                "Run with appropriate privileges (CAP_SYS_ADMIN)".to_string(),
+                "Check PolicyKit configuration".to_string(),
+                "Verify user is in required groups".to_string(),
+            ],
+            SegwireError::System(_) => vec![
+                "Check system resources and limits".to_string(),
+                "Verify kernel support for network namespaces".to_string(),
+                "Check system logs for additional details".to_string(),
+            ],
+            _ => vec!["Check logs for additional details".to_string()],
+        }
+    }
+
+    /// Log this error with full context
+    pub fn log_with_context(&self, context: &ErrorContext) {
+        let span = tracing::error_span!(
+            "error_report",
+            operation = %context.operation,
+            error_category = self.category(),
+            namespace = context.namespace.as_deref(),
+            config_path = context.config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            recoverable = self.is_recoverable(),
+        );
+        let _enter = span.enter();
+
+        error!("Operation failed: {}", self);
+        error!("User message: {}", self.user_message());
+
+        // Log context fields
+        for (key, value) in &context.fields {
+            error!("Context {}: {}", key, value);
+        }
+
+        // Log remediation steps
+        if !context.remediation.is_empty() {
+            error!("Custom remediation steps:");
+            for (i, step) in context.remediation.iter().enumerate() {
+                error!("  {}. {}", i + 1, step);
+            }
+        } else {
+            let steps = self.remediation_steps();
+            if !steps.is_empty() {
+                error!("Suggested remediation steps:");
+                for (i, step) in steps.iter().enumerate() {
+                    error!("  {}. {}", i + 1, step);
+                }
+            }
+        }
+    }
+
+    /// Create an error with context
+    pub fn with_context(self, context: ErrorContext) -> ContextualError {
+        ContextualError {
+            error: self,
+            context,
+        }
+    }
+}
+
+/// Error with additional context information
+#[derive(Debug)]
+pub struct ContextualError {
+    pub error: SegwireError,
+    pub context: ErrorContext,
+}
+
+impl std::fmt::Display for ContextualError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (operation: {})", self.error, self.context.operation)
+    }
+}
+
+impl std::error::Error for ContextualError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl ContextualError {
+    /// Log this contextual error
+    pub fn log(&self) {
+        self.error.log_with_context(&self.context);
+    }
+
+    /// Log and return the inner error
+    pub fn log_and_return(self) -> SegwireError {
+        self.log();
+        self.error
     }
 }
 
