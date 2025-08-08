@@ -75,14 +75,15 @@ impl DbusService {
 
     /// Run the D-Bus service event loop
     pub async fn run(&self) -> Result<(), SegwireError> {
-        info!("Starting D-Bus service event loop");
+        info!("D-Bus service is ready to handle requests");
         
         // The connection will handle incoming method calls automatically
-        // We just need to keep the service running
-        loop {
-            monoio::time::sleep(std::time::Duration::from_secs(1)).await;
-            // Service runs in background, this is just to keep the task alive
-        }
+        // through zbus's internal event loop. We don't need to block here
+        // since the connection is already registered and active.
+        
+        // Just return success - the actual D-Bus handling happens
+        // through the zbus connection's internal mechanisms
+        Ok(())
     }
 
     /// Emit a namespace created signal
