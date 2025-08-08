@@ -14,7 +14,7 @@ The system follows a declarative configuration approach similar to systemd-netwo
 
 - **Declarative Configuration**: Administrators describe desired state, daemon ensures actual state matches
 - **High Performance I/O**: Uses monoio runtime with io_uring for efficient file monitoring and network operations
-- **Robust Error Handling**: Graceful degradation and comprehensive logging
+- **Robust Error Handling**: Failure isolation to a single namespace and comprehensive logging
 - **Standard Integration**: Uses D-Bus for IPC and PolicyKit for authorization
 - **File-Based Configuration**: TOML files for human-readable, version-controllable configuration
 
@@ -234,7 +234,6 @@ cleanup_on_shutdown = true
 
 # Logging configuration
 log_level = "info"
-log_target = "syslog"
 
 [dbus]
 # D-Bus service name

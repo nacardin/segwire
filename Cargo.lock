@@ -1440,6 +1440,9 @@ dependencies = [
  "segwire-common",
  "serde_json",
  "tabled",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
  "zbus",
 ]
 

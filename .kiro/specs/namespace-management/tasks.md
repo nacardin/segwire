@@ -114,13 +114,13 @@
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6_
 
 - [ ] 8. Build CLI D-Bus client implementation
-  - [ ] 8.1 Create D-Bus client connection and discovery
+  - [x] 8.1 Create D-Bus client connection and discovery
     - Implement connection to daemon's D-Bus service
     - Add service discovery and availability checking
     - Create connection error handling and retry logic
     - _Requirements: 6.2, 6.5_
 
-  - [ ] 8.2 Implement CLI command parsing and validation
+  - [-] 8.2 Implement CLI command parsing and validation
     - Create clap-based command structure for all operations
     - Add input validation and help text generation
     - Implement command-specific argument parsing
