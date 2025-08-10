@@ -86,8 +86,8 @@
   - [x] 6.2 Implement namespace management D-Bus methods
     - Add ListNamespaces method with status information
     - Implement GetNamespaceStatus with detailed information
-    - Create CreateNamespace and DeleteNamespace methods
-    - _Requirements: 3.1, 3.2, 4.1, 4.2_
+    - Create RestartNamespace method for recreating namespaces from configuration
+    - _Requirements: 3.1, 3.2, 4.2_
 
   - [x] 6.3 Add configuration management D-Bus methods
     - Implement ReloadConfiguration method
@@ -120,11 +120,11 @@
     - Create connection error handling and retry logic
     - _Requirements: 6.2, 6.5_
 
-  - [-] 8.2 Implement CLI command parsing and validation
+  - [x] 8.2 Implement CLI command parsing and validation
     - Create clap-based command structure for all operations
     - Add input validation and help text generation
     - Implement command-specific argument parsing
-    - _Requirements: 3.1, 3.2, 4.1, 4.2, 4.3, 4.4, 4.6_
+    - _Requirements: 3.1, 3.2, 4.1, 4.2, 4.3_
 
   - [ ] 8.3 Add output formatting and display
     - Implement table-based output for status and list commands

@@ -18,6 +18,9 @@ clap = { workspace = true }
 tabled = { workspace = true }
 serde_json = { workspace = true }
 
+# Configuration parsing
+toml = { workspace = true }
+
 # Async runtime using io_uring
 monoio = { workspace = true }
 

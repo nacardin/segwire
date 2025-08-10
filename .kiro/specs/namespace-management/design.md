@@ -17,6 +17,7 @@ The system follows a declarative configuration approach similar to systemd-netwo
 - **Robust Error Handling**: Failure isolation to a single namespace and comprehensive logging
 - **Standard Integration**: Uses D-Bus for IPC and PolicyKit for authorization
 - **File-Based Configuration**: TOML files for human-readable, version-controllable configuration
+- **Configuration-Driven Lifecycle**: Namespace creation and deletion is controlled entirely through configuration file presence - no direct CLI commands for namespace lifecycle management
 
 ## Architecture
 
@@ -136,7 +137,7 @@ segwire-common = { path = "../segwire-common" }
 **Command Parser**
 - Parses command-line arguments and subcommands
 - Validates input parameters and provides help text
-- Supports commands: status, list, create, delete, reload, restart, validate
+- Supports commands: status, list, reload, restart, validate
 
 **D-Bus Client**
 - Connects to daemon's D-Bus service
@@ -304,12 +305,7 @@ The D-Bus interface is defined in the `segwire-common` crate and shared between 
       <arg direction="out" name="status" type="(sssas)"/>
     </method>
     
-    <method name="CreateNamespace">
-      <arg direction="in" name="config_path" type="s"/>
-      <arg direction="out" name="success" type="b"/>
-    </method>
-    
-    <method name="DeleteNamespace">
+    <method name="RestartNamespace">
       <arg direction="in" name="name" type="s"/>
       <arg direction="out" name="success" type="b"/>
     </method>
@@ -556,19 +552,9 @@ PolicyKit rules for fine-grained authorization:
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <action id="org.segwire.namespace.create">
-    <description>Create network namespace</description>
-    <message>Authentication is required to create network namespaces</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-  </action>
-  
-  <action id="org.segwire.namespace.delete">
-    <description>Delete network namespace</description>
-    <message>Authentication is required to delete network namespaces</message>
+  <action id="org.segwire.namespace.restart">
+    <description>Restart network namespace</description>
+    <message>Authentication is required to restart network namespaces</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>

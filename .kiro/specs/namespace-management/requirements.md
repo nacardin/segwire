@@ -52,16 +52,16 @@ The daemon will monitor configuration files, create and manage network namespace
 
 ### Requirement 4
 
-**User Story:** As a system administrator, I want the CLI to allow manual control of namespace operations, so that I can override automatic behavior when needed for maintenance or troubleshooting.
+**User Story:** As a system administrator, I want the CLI to allow manual control of daemon operations, so that I can trigger maintenance operations and troubleshoot issues without directly manipulating namespaces.
 
 #### Acceptance Criteria
 
-1. WHEN I use the create command THEN the CLI SHALL instruct the daemon to create a namespace from a specified configuration
-2. WHEN I use the delete command THEN the CLI SHALL instruct the daemon to remove a specified namespace
-3. WHEN I use the reload command THEN the CLI SHALL instruct the daemon to re-read configuration files
-4. WHEN I use the restart command for a namespace THEN the CLI SHALL instruct the daemon to recreate that namespace
-5. IF a manual operation conflicts with automatic management THEN the CLI SHALL warn the user and require confirmation
-6. WHEN I use the validate command THEN the CLI SHALL check configuration files for syntax errors without applying them
+1. WHEN I use the reload command THEN the CLI SHALL instruct the daemon to re-read configuration files and apply any changes
+2. WHEN I use the restart command for a namespace THEN the CLI SHALL instruct the daemon to recreate that namespace from its configuration file
+3. WHEN I use the validate command THEN the CLI SHALL check configuration files for syntax errors without applying them
+4. WHEN namespace creation or deletion is needed THEN it SHALL be accomplished by creating or deleting configuration files in the designated directory
+5. WHEN I create a new configuration file THEN the daemon SHALL automatically detect it and create the corresponding namespace
+6. WHEN I delete a configuration file THEN the daemon SHALL automatically detect the deletion and remove the corresponding namespace
 
 ### Requirement 5
 

@@ -51,6 +51,8 @@ impl DbusClient {
         })
     }
     
+
+    
     /// Connect to the system D-Bus with retry logic
     async fn connect_with_retry() -> Result<Connection> {
         let mut last_error = None;
