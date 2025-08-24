@@ -554,8 +554,8 @@ impl NamespaceManagerInterface {
         debug!("Creating namespace '{}' from configuration", full_name);
         
         // Create the network namespace using netlink
-        let netlink_manager = NetlinkManager::new().await?;
-        netlink_manager.create_namespace(&full_name).await?;
+        let netlink_manager = NetlinkManager::new()?;
+        netlink_manager.create_namespace(&full_name)?;
         
         // Create namespace state for tracking
         let namespace_state = NamespaceState::new(
@@ -597,8 +597,8 @@ impl NamespaceManagerInterface {
         debug!("Deleting namespace '{}'", full_name);
         
         // Delete the network namespace using netlink
-        let netlink_manager = NetlinkManager::new().await?;
-        netlink_manager.delete_namespace(&full_name).await?;
+        let netlink_manager = NetlinkManager::new()?;
+        netlink_manager.delete_namespace(&full_name)?;
         
         // Remove from managed namespaces
         {

@@ -2,7 +2,7 @@
 members = [
     "crates/segwire-daemon",
     "crates/segwire-cli",
-    "crates/segwire-common"
+    "crates/segwire-common",
 ]
 resolver = "2"
 
@@ -34,8 +34,16 @@ regex = "1.0"
 
 # Network namespace management
 netlink-packet-route = "0.17"
-rtnetlink = "0.13"
-nix = { version = "0.27", features = ["user", "process"] }
+netlink-packet-core = "0.7"
+netlink-packet-utils = "0.5"
+netlink-sys = "0.8"
+nix = { version = "0.27", features = [
+    "user",
+    "process",
+    "sched",
+    "mount",
+    "fs",
+] }
 
 # Logging
 tracing = "0.1"

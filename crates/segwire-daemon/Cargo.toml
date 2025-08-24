@@ -12,8 +12,6 @@ segwire-common = { workspace = true }
 zbus = { workspace = true }
 
 # Network namespace management
-netlink-packet-route = { workspace = true }
-rtnetlink = { workspace = true }
 nix = { workspace = true }
 
 # Configuration parsing

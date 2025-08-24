@@ -108,7 +108,7 @@ impl NamespaceStateManager {
     pub async fn new() -> SegwireResult<Self> {
         info!("Initializing namespace state manager");
         
-        let netlink_manager = NetlinkManager::new().await
+        let netlink_manager = NetlinkManager::new()
             .map_err(|e| {
                 error!("Failed to initialize netlink manager: {}", e);
                 e
@@ -180,7 +180,7 @@ impl NamespaceStateManager {
         let namespace_configs = config_manager.namespace_configs();
         
         // Get actual namespaces from the system
-        let actual_namespaces = match self.netlink_manager.list_namespaces().await {
+        let actual_namespaces = match self.netlink_manager.list_namespaces() {
             Ok(namespaces) => namespaces,
             Err(e) => {
                 error!("Failed to list actual namespaces: {}", e);
@@ -373,7 +373,7 @@ impl NamespaceStateManager {
         self.update_namespace_state(state.clone());
         
         // Attempt to create the namespace
-        match self.netlink_manager.create_namespace(full_name).await {
+        match self.netlink_manager.create_namespace(full_name) {
             Ok(namespace_info) => {
                 info!("Successfully created namespace: {}", full_name);
                 
@@ -526,7 +526,7 @@ impl NamespaceStateManager {
             ConflictResolution::UpdateNamespace => {
                 if let Some(config_entry) = config_manager.get_namespace_config(&conflict.namespace_name) {
                     // Get actual namespace info
-                    let actual_namespaces = self.netlink_manager.list_namespaces().await?;
+                    let actual_namespaces = self.netlink_manager.list_namespaces()?;
                     if let Some(actual_info) = actual_namespaces.get(&conflict.namespace_name) {
                         self.update_existing_namespace(config_entry, actual_info).await?;
                     }
@@ -535,7 +535,7 @@ impl NamespaceStateManager {
             
             ConflictResolution::DeleteNamespace => {
                 info!("Deleting namespace without configuration: {}", conflict.namespace_name);
-                match self.netlink_manager.delete_namespace(&conflict.namespace_name).await {
+                match self.netlink_manager.delete_namespace(&conflict.namespace_name) {
                     Ok(_) => {
                         self.remove_namespace_state(&conflict.namespace_name);
                         info!("Successfully deleted namespace: {}", conflict.namespace_name);
@@ -703,7 +703,7 @@ servers = ["8.8.8.8"]
     #[monoio::test]
     async fn test_state_operations() {
         // Create a mock manager for testing
-        let netlink_manager = match NetlinkManager::new().await {
+        let netlink_manager = match NetlinkManager::new() {
             Ok(manager) => manager,
             Err(_) => {
                 // In test environment, create a minimal mock
@@ -773,7 +773,7 @@ servers = ["8.8.8.8"]
     #[monoio::test]
     async fn test_state_stats() {
         // Create a mock manager for testing
-        let netlink_manager = match NetlinkManager::new().await {
+        let netlink_manager = match NetlinkManager::new() {
             Ok(manager) => manager,
             Err(_) => return, // Skip test if netlink is not available
         };
