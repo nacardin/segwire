@@ -227,7 +227,7 @@ fn netlink_request(
 
 /// Open a netlink ROUTE socket, bind it, and return it.
 fn open_netlink_socket() -> Result<Socket, NetlinkError> {
-    let mut socket = Socket::new(NETLINK_ROUTE as isize)
+    let mut socket = Socket::new(NETLINK_ROUTE)
         .map_err(|e| NetlinkError::SocketError(format!("socket creation failed: {}", e)))?;
     socket
         .bind_auto()
@@ -532,7 +532,7 @@ impl NetlinkManager {
             Ok(names)
         })?;
 
-        result.map_err(|e| SegwireError::Network(e))
+        result.map_err(SegwireError::Network)
     }
 
     /// Move a network interface to a namespace.
@@ -783,7 +783,7 @@ impl NetlinkManager {
             Ok(routes)
         })?;
 
-        result.map_err(|e| SegwireError::Network(e))
+        result.map_err(SegwireError::Network)
     }
 
     // -----------------------------------------------------------------------
@@ -966,7 +966,7 @@ impl NetlinkManager {
         .join()
         .map_err(|_| SegwireError::Network("namespace thread panicked".to_string()))?;
 
-        result.map_err(|e| SegwireError::Network(e))
+        result.map_err(SegwireError::Network)
     }
 
     // -----------------------------------------------------------------------
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn test_validate_namespace_name() {
-        let mgr_result = NetlinkManager {
+        let _mgr_result = NetlinkManager {
             socket: open_netlink_socket().unwrap_or_else(|_| {
                 // Tests may run without privileges; create a dummy for validation tests
                 panic!("Need root for this test");

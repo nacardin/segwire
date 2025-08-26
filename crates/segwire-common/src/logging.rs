@@ -93,9 +93,7 @@ impl Default for LogConfig {
 /// Initialize console logging with the given configuration
 pub fn init_logging(config: LogConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| {
-            EnvFilter::try_new(format!("{}={}", config.component, config.level.to_string()))
-        })
+        .or_else(|_| EnvFilter::try_new(format!("{}={}", config.component, config.level)))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer()

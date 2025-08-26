@@ -1,14 +1,12 @@
 //! Logging demonstration for segwire daemon
-//! 
+//!
 //! This example shows how the structured logging system works with different
 //! log levels, targets, and context information.
 
-use segwire_common::{
-    LogConfig, LogLevel, LogContext, 
-    init_logging, log_info, log_warn, log_debug,
-    SegwireError,
-};
 use segwire_common::error::ErrorContext;
+use segwire_common::{
+    init_logging, log_debug, log_info, log_warn, LogConfig, LogContext, LogLevel, SegwireError,
+};
 use std::path::PathBuf;
 
 #[monoio::main]

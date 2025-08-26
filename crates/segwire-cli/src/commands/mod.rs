@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 
-pub mod status;
 pub mod list;
 pub mod reload;
 pub mod restart;
+pub mod status;
 pub mod validate;
 
 /// Segwire CLI - Network namespace management tool
@@ -21,16 +21,16 @@ pub struct Cli {
 pub enum Commands {
     /// Display detailed status information about namespaces
     Status(status::StatusArgs),
-    
+
     /// List all managed namespaces with summary information
     List(list::ListArgs),
-    
+
     /// Reload daemon configuration files
     Reload(reload::ReloadArgs),
-    
+
     /// Restart (recreate) an existing namespace
     Restart(restart::RestartArgs),
-    
+
     /// Validate configuration files without applying them
     Validate(validate::ValidateArgs),
 }

@@ -1,14 +1,14 @@
 //! D-Bus interface definitions and types
-//! 
+//!
 //! Defines all D-Bus interface structures, method signatures, and data types
 //! used for communication between the daemon and CLI components.
 
+use crate::error::SegwireError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use zvariant::Type;
-use crate::error::SegwireError;
 
 /// D-Bus interface name for the namespace manager
 pub const DBUS_INTERFACE_NAME: &str = "org.segwire.NamespaceManager";
@@ -24,12 +24,12 @@ pub const DBUS_OBJECT_PATH: &str = "/org/segwire/NamespaceManager";
 pub struct NamespaceState {
     pub name: String,
     pub full_name: String, // prefixed name
-    pub status: String, // Status as string for D-Bus compatibility
+    pub status: String,    // Status as string for D-Bus compatibility
     pub config_path: String,
     pub interfaces: Vec<InterfaceInfo>,
     pub routes: Vec<RouteInfo>,
     pub dns_config: DnsInfo,
-    pub created_at: u64, // Unix timestamp
+    pub created_at: u64,   // Unix timestamp
     pub last_updated: u64, // Unix timestamp
 }
 
@@ -47,7 +47,7 @@ pub enum NamespaceStatus {
 pub struct InterfaceInfo {
     pub name: String,
     pub interface_type: String, // physical, virtual, etc.
-    pub status: String, // up, down, etc.
+    pub status: String,         // up, down, etc.
     pub addresses: Vec<String>,
 }
 
@@ -99,7 +99,7 @@ impl NamespaceState {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-            
+
         Self {
             name,
             full_name,
@@ -115,7 +115,7 @@ impl NamespaceState {
             last_updated: now,
         }
     }
-    
+
     /// Update the last modified timestamp
     pub fn touch(&mut self) {
         self.last_updated = SystemTime::now()
@@ -123,17 +123,17 @@ impl NamespaceState {
             .unwrap()
             .as_secs();
     }
-    
+
     /// Check if the namespace is in an active state
     pub fn is_active(&self) -> bool {
         self.status == "active"
     }
-    
+
     /// Check if the namespace is in a failed state
     pub fn is_failed(&self) -> bool {
         self.status.starts_with("failed")
     }
-    
+
     /// Set the status with a NamespaceStatus enum
     pub fn set_status(&mut self, status: NamespaceStatus) {
         self.status = status.as_str().to_string();
@@ -151,7 +151,7 @@ impl NamespaceStatus {
             NamespaceStatus::Deleting => "deleting",
         }
     }
-    
+
     /// Check if the status indicates an error condition
     pub fn is_error(&self) -> bool {
         matches!(self, NamespaceStatus::Failed)
@@ -167,7 +167,7 @@ impl OperationResult {
             details: HashMap::new(),
         }
     }
-    
+
     /// Create a failed operation result
     pub fn failure(message: String) -> Self {
         Self {
@@ -176,7 +176,7 @@ impl OperationResult {
             details: HashMap::new(),
         }
     }
-    
+
     /// Add detail information to the result
     pub fn with_detail(mut self, key: String, value: String) -> Self {
         self.details.insert(key, value);
@@ -222,7 +222,7 @@ impl DbusError {
             DbusError::InternalError(_) => "org.segwire.Error.Internal",
         }
     }
-    
+
     /// Get the error message
     pub fn message(&self) -> &str {
         match self {
@@ -254,20 +254,20 @@ impl From<SegwireError> for DbusError {
 /// These are the method definitions that both the daemon and CLI need to know about
 pub mod method_signatures {
     use super::*;
-    
+
     /// List all managed namespaces with basic information
     /// Returns: Array of (name, status, config_path, description)
     pub type ListNamespacesResult = Vec<(String, String, String, String)>;
-    
+
     /// Get detailed status information for a specific namespace
     pub type GetNamespaceStatusResult = NamespaceState;
-    
+
     /// Standard operation result type
     pub type StandardOperationResult = OperationResult;
-    
+
     /// Configuration validation result
     pub type ConfigValidationResult = ValidationResult;
-    
+
     /// Daemon status information
     /// Returns: (version, uptime, managed_count, active_count)
     pub type DaemonStatusResult = (String, u64, u32, u32);
@@ -278,23 +278,23 @@ pub mod signals {
     /// Signal emitted when a namespace is created
     /// Args: (name, config_path)
     pub type NamespaceCreated = (String, String);
-    
+
     /// Signal emitted when a namespace is deleted
     /// Args: (name, reason)
     pub type NamespaceDeleted = (String, String);
-    
+
     /// Signal emitted when configuration is reloaded
     /// Args: (count, errors)
     pub type ConfigurationReloaded = (u32, u32);
-    
+
     /// Signal emitted for operation progress updates
     /// Args: (operation, progress, message)
     pub type ProgressUpdate = (String, f64, String);
-    
+
     /// Signal emitted when a namespace status changes
     /// Args: (name, old_status, new_status)
     pub type NamespaceStatusChanged = (String, String, String);
-    
+
     /// Signal emitted when an error occurs
     /// Args: (error_type, message, namespace)
     pub type ErrorOccurred = (String, String, String);
@@ -303,16 +303,16 @@ pub mod signals {
 /// D-Bus interface constants and method signatures
 /// These define the interface contract that both daemon and CLI must follow
 pub mod interface {
-    
+
     /// D-Bus interface name
     pub const INTERFACE_NAME: &str = "org.segwire.NamespaceManager";
-    
+
     /// D-Bus service name
     pub const SERVICE_NAME: &str = "org.segwire.NamespaceManager";
-    
+
     /// D-Bus object path
     pub const OBJECT_PATH: &str = "/org/segwire/NamespaceManager";
-    
+
     /// Method names as constants
     pub const METHOD_LIST_NAMESPACES: &str = "ListNamespaces";
     pub const METHOD_GET_NAMESPACE_STATUS: &str = "GetNamespaceStatus";
@@ -322,7 +322,7 @@ pub mod interface {
     pub const METHOD_VALIDATE_CONFIGURATION: &str = "ValidateConfiguration";
     pub const METHOD_GET_DAEMON_STATUS: &str = "GetDaemonStatus";
     pub const METHOD_RESTART_NAMESPACE: &str = "RestartNamespace";
-    
+
     /// Signal names as constants
     pub const SIGNAL_NAMESPACE_CREATED: &str = "NamespaceCreated";
     pub const SIGNAL_NAMESPACE_DELETED: &str = "NamespaceDeleted";
@@ -330,7 +330,7 @@ pub mod interface {
     pub const SIGNAL_OPERATION_PROGRESS: &str = "OperationProgress";
     pub const SIGNAL_NAMESPACE_STATUS_CHANGED: &str = "NamespaceStatusChanged";
     pub const SIGNAL_ERROR_OCCURRED: &str = "ErrorOccurred";
-    
+
     /// Method information for introspection
     #[derive(Debug, Clone)]
     pub struct MethodInfo {
@@ -339,7 +339,7 @@ pub mod interface {
         pub input_args: Vec<ArgInfo>,
         pub output_args: Vec<ArgInfo>,
     }
-    
+
     /// Argument information for methods and signals
     #[derive(Debug, Clone)]
     pub struct ArgInfo {
@@ -347,7 +347,7 @@ pub mod interface {
         pub type_signature: &'static str,
         pub description: &'static str,
     }
-    
+
     /// Signal information for introspection
     #[derive(Debug, Clone)]
     pub struct SignalInfo {
@@ -355,7 +355,7 @@ pub mod interface {
         pub description: &'static str,
         pub args: Vec<ArgInfo>,
     }
-    
+
     /// Get all available methods with their signatures and descriptions
     pub fn get_methods() -> Vec<MethodInfo> {
         vec![
@@ -461,7 +461,7 @@ pub mod interface {
             },
         ]
     }
-    
+
     /// Get all available signals with their signatures and descriptions
     pub fn get_signals() -> Vec<SignalInfo> {
         vec![
@@ -578,27 +578,27 @@ pub mod interface {
             },
         ]
     }
-    
+
     /// Find a method by name
     pub fn find_method(name: &str) -> Option<MethodInfo> {
         get_methods().into_iter().find(|m| m.name == name)
     }
-    
+
     /// Find a signal by name
     pub fn find_signal(name: &str) -> Option<SignalInfo> {
         get_signals().into_iter().find(|s| s.name == name)
     }
-    
+
     /// Get method names as a list
     pub fn get_method_names() -> Vec<&'static str> {
         get_methods().into_iter().map(|m| m.name).collect()
     }
-    
+
     /// Get signal names as a list
     pub fn get_signal_names() -> Vec<&'static str> {
         get_signals().into_iter().map(|s| s.name).collect()
     }
-    
+
     /// Generate D-Bus introspection XML for the interface
     pub fn introspection_xml() -> &'static str {
         r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
@@ -684,61 +684,81 @@ pub mod interface {
 /// Helper functions for D-Bus interface management
 pub mod interface_helpers {
     use super::*;
-    
+
     /// Create a D-Bus error from a SegwireError
     pub fn create_dbus_error(error: SegwireError) -> zbus::fdo::Error {
         let dbus_error = DbusError::from(error);
         zbus::fdo::Error::Failed(dbus_error.message().to_string())
     }
-    
+
     /// Convert a namespace list to D-Bus tuple format
-    pub fn namespaces_to_tuples(namespaces: Vec<NamespaceState>) -> Vec<(String, String, String, String)> {
+    pub fn namespaces_to_tuples(
+        namespaces: Vec<NamespaceState>,
+    ) -> Vec<(String, String, String, String)> {
         namespaces
             .into_iter()
             .map(|ns| (ns.name, ns.status, ns.config_path, "".to_string())) // description placeholder
             .collect()
     }
-    
+
     /// Create daemon status tuple
-    pub fn create_daemon_status(version: String, uptime: u64, managed: u32, active: u32) -> (String, u64, u32, u32) {
+    pub fn create_daemon_status(
+        version: String,
+        uptime: u64,
+        managed: u32,
+        active: u32,
+    ) -> (String, u64, u32, u32) {
         (version, uptime, managed, active)
     }
-    
+
     /// Validate D-Bus method parameters
     pub fn validate_namespace_name(name: &str) -> Result<(), DbusError> {
         if name.is_empty() {
-            return Err(DbusError::ConfigurationError("Namespace name cannot be empty".to_string()));
-        }
-        
-        if name.len() > 255 {
-            return Err(DbusError::ConfigurationError("Namespace name too long".to_string()));
-        }
-        
-        // Check for valid characters (alphanumeric, hyphens, underscores)
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
             return Err(DbusError::ConfigurationError(
-                "Namespace name contains invalid characters".to_string()
+                "Namespace name cannot be empty".to_string(),
             ));
         }
-        
+
+        if name.len() > 255 {
+            return Err(DbusError::ConfigurationError(
+                "Namespace name too long".to_string(),
+            ));
+        }
+
+        // Check for valid characters (alphanumeric, hyphens, underscores)
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(DbusError::ConfigurationError(
+                "Namespace name contains invalid characters".to_string(),
+            ));
+        }
+
         Ok(())
     }
-    
+
     /// Validate configuration file path
     pub fn validate_config_path(path: &str) -> Result<(), DbusError> {
         if path.is_empty() {
-            return Err(DbusError::ConfigurationError("Configuration path cannot be empty".to_string()));
+            return Err(DbusError::ConfigurationError(
+                "Configuration path cannot be empty".to_string(),
+            ));
         }
-        
+
         if !path.ends_with(".toml") {
-            return Err(DbusError::ConfigurationError("Configuration file must have .toml extension".to_string()));
+            return Err(DbusError::ConfigurationError(
+                "Configuration file must have .toml extension".to_string(),
+            ));
         }
-        
+
         // Basic path traversal protection
         if path.contains("..") {
-            return Err(DbusError::ConfigurationError("Path traversal not allowed".to_string()));
+            return Err(DbusError::ConfigurationError(
+                "Path traversal not allowed".to_string(),
+            ));
         }
-        
+
         Ok(())
     }
 }
@@ -746,19 +766,19 @@ pub mod interface_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_interface_constants() {
         assert_eq!(interface::INTERFACE_NAME, "org.segwire.NamespaceManager");
         assert_eq!(interface::SERVICE_NAME, "org.segwire.NamespaceManager");
         assert_eq!(interface::OBJECT_PATH, "/org/segwire/NamespaceManager");
     }
-    
+
     #[test]
     fn test_method_discovery() {
         let methods = interface::get_methods();
         assert!(!methods.is_empty());
-        
+
         // Check that all expected methods are present
         let method_names: Vec<&str> = methods.iter().map(|m| m.name).collect();
         assert!(method_names.contains(&interface::METHOD_LIST_NAMESPACES));
@@ -770,12 +790,12 @@ mod tests {
         assert!(method_names.contains(&interface::METHOD_GET_DAEMON_STATUS));
         assert!(method_names.contains(&interface::METHOD_RESTART_NAMESPACE));
     }
-    
+
     #[test]
     fn test_signal_discovery() {
         let signals = interface::get_signals();
         assert!(!signals.is_empty());
-        
+
         // Check that all expected signals are present
         let signal_names: Vec<&str> = signals.iter().map(|s| s.name).collect();
         assert!(signal_names.contains(&interface::SIGNAL_NAMESPACE_CREATED));
@@ -785,7 +805,7 @@ mod tests {
         assert!(signal_names.contains(&interface::SIGNAL_NAMESPACE_STATUS_CHANGED));
         assert!(signal_names.contains(&interface::SIGNAL_ERROR_OCCURRED));
     }
-    
+
     #[test]
     fn test_method_lookup() {
         // Test finding existing method
@@ -794,12 +814,12 @@ mod tests {
         let method = method.unwrap();
         assert_eq!(method.name, interface::METHOD_LIST_NAMESPACES);
         assert!(!method.description.is_empty());
-        
+
         // Test finding non-existent method
         let method = interface::find_method("NonExistentMethod");
         assert!(method.is_none());
     }
-    
+
     #[test]
     fn test_signal_lookup() {
         // Test finding existing signal
@@ -809,34 +829,37 @@ mod tests {
         assert_eq!(signal.name, interface::SIGNAL_NAMESPACE_CREATED);
         assert!(!signal.description.is_empty());
         assert_eq!(signal.args.len(), 2); // name and config_path
-        
+
         // Test finding non-existent signal
         let signal = interface::find_signal("NonExistentSignal");
         assert!(signal.is_none());
     }
-    
+
     #[test]
     fn test_method_signatures() {
         let methods = interface::get_methods();
-        
+
         // Test ListNamespaces method
-        let list_method = methods.iter()
+        let list_method = methods
+            .iter()
             .find(|m| m.name == interface::METHOD_LIST_NAMESPACES)
             .expect("ListNamespaces method should exist");
         assert!(list_method.input_args.is_empty());
         assert_eq!(list_method.output_args.len(), 1);
         assert_eq!(list_method.output_args[0].type_signature, "a(ssss)");
-        
+
         // Test GetNamespaceStatus method
-        let status_method = methods.iter()
+        let status_method = methods
+            .iter()
             .find(|m| m.name == interface::METHOD_GET_NAMESPACE_STATUS)
             .expect("GetNamespaceStatus method should exist");
         assert_eq!(status_method.input_args.len(), 1);
         assert_eq!(status_method.input_args[0].type_signature, "s");
         assert_eq!(status_method.output_args.len(), 1);
-        
+
         // Test CreateNamespace method
-        let create_method = methods.iter()
+        let create_method = methods
+            .iter()
             .find(|m| m.name == interface::METHOD_CREATE_NAMESPACE)
             .expect("CreateNamespace method should exist");
         assert_eq!(create_method.input_args.len(), 1);
@@ -844,21 +867,23 @@ mod tests {
         assert_eq!(create_method.output_args.len(), 1);
         assert_eq!(create_method.output_args[0].type_signature, "(bsa{ss})");
     }
-    
+
     #[test]
     fn test_signal_signatures() {
         let signals = interface::get_signals();
-        
+
         // Test NamespaceCreated signal
-        let created_signal = signals.iter()
+        let created_signal = signals
+            .iter()
             .find(|s| s.name == interface::SIGNAL_NAMESPACE_CREATED)
             .expect("NamespaceCreated signal should exist");
         assert_eq!(created_signal.args.len(), 2);
         assert_eq!(created_signal.args[0].type_signature, "s");
         assert_eq!(created_signal.args[1].type_signature, "s");
-        
+
         // Test OperationProgress signal
-        let progress_signal = signals.iter()
+        let progress_signal = signals
+            .iter()
             .find(|s| s.name == interface::SIGNAL_OPERATION_PROGRESS)
             .expect("OperationProgress signal should exist");
         assert_eq!(progress_signal.args.len(), 3);
@@ -866,12 +891,12 @@ mod tests {
         assert_eq!(progress_signal.args[1].type_signature, "d"); // progress (double)
         assert_eq!(progress_signal.args[2].type_signature, "s"); // message
     }
-    
+
     #[test]
     fn test_introspection_xml() {
         let xml = interface::introspection_xml();
         assert!(!xml.is_empty());
-        
+
         // Check that XML contains expected elements
         assert!(xml.contains("org.segwire.NamespaceManager"));
         assert!(xml.contains("ListNamespaces"));
@@ -879,7 +904,7 @@ mod tests {
         assert!(xml.contains("CreateNamespace"));
         assert!(xml.contains("NamespaceCreated"));
         assert!(xml.contains("OperationProgress"));
-        
+
         // Check that it's valid XML structure
         assert!(xml.starts_with("<!DOCTYPE"));
         assert!(xml.contains("<node>"));
@@ -887,39 +912,42 @@ mod tests {
         assert!(xml.contains("<interface"));
         assert!(xml.contains("</interface>"));
     }
-    
+
     #[test]
     fn test_method_enumeration() {
         let method_names = interface::get_method_names();
         assert_eq!(method_names.len(), 8); // We should have 8 methods
-        
+
         let signal_names = interface::get_signal_names();
         assert_eq!(signal_names.len(), 6); // We should have 6 signals
     }
-    
+
     #[test]
     fn test_dbus_error_types() {
         let config_error = DbusError::ConfigurationError("test config error".to_string());
         assert_eq!(config_error.error_name(), "org.segwire.Error.Configuration");
         assert_eq!(config_error.message(), "test config error");
-        
+
         let network_error = DbusError::NetworkError("test network error".to_string());
         assert_eq!(network_error.error_name(), "org.segwire.Error.Network");
         assert_eq!(network_error.message(), "test network error");
-        
+
         let permission_error = DbusError::PermissionDenied("test permission error".to_string());
-        assert_eq!(permission_error.error_name(), "org.segwire.Error.PermissionDenied");
+        assert_eq!(
+            permission_error.error_name(),
+            "org.segwire.Error.PermissionDenied"
+        );
         assert_eq!(permission_error.message(), "test permission error");
     }
-    
+
     #[test]
     fn test_namespace_state_creation() {
         let state = NamespaceState::new(
             "test-ns".to_string(),
             "segwire-test-ns".to_string(),
-            PathBuf::from("/etc/segwire/test.toml")
+            PathBuf::from("/etc/segwire/test.toml"),
         );
-        
+
         assert_eq!(state.name, "test-ns");
         assert_eq!(state.full_name, "segwire-test-ns");
         assert_eq!(state.status, "creating");
@@ -930,54 +958,54 @@ mod tests {
         assert!(state.created_at > 0);
         assert!(state.last_updated > 0);
     }
-    
+
     #[test]
     fn test_namespace_status_enum() {
         assert_eq!(NamespaceStatus::Creating.as_str(), "creating");
         assert_eq!(NamespaceStatus::Active.as_str(), "active");
         assert_eq!(NamespaceStatus::Failed.as_str(), "failed");
         assert_eq!(NamespaceStatus::Deleting.as_str(), "deleting");
-        
+
         assert!(!NamespaceStatus::Creating.is_error());
         assert!(!NamespaceStatus::Active.is_error());
         assert!(NamespaceStatus::Failed.is_error());
         assert!(!NamespaceStatus::Deleting.is_error());
     }
-    
+
     #[test]
     fn test_operation_result() {
         let success = OperationResult::success("Operation completed".to_string());
         assert!(success.success);
         assert_eq!(success.message, "Operation completed");
         assert!(success.details.is_empty());
-        
+
         let failure = OperationResult::failure("Operation failed".to_string());
         assert!(!failure.success);
         assert_eq!(failure.message, "Operation failed");
         assert!(failure.details.is_empty());
-        
+
         let with_details = success.with_detail("key".to_string(), "value".to_string());
         assert_eq!(with_details.details.get("key"), Some(&"value".to_string()));
     }
-    
+
     #[test]
     fn test_validation_helpers() {
         use interface_helpers::*;
-        
+
         // Test valid namespace name
         assert!(validate_namespace_name("valid-namespace").is_ok());
         assert!(validate_namespace_name("valid_namespace").is_ok());
         assert!(validate_namespace_name("namespace123").is_ok());
-        
+
         // Test invalid namespace names
         assert!(validate_namespace_name("").is_err());
         assert!(validate_namespace_name("invalid namespace").is_err()); // space
         assert!(validate_namespace_name("invalid@namespace").is_err()); // special char
-        
+
         // Test valid config path
         assert!(validate_config_path("/etc/segwire/test.toml").is_ok());
         assert!(validate_config_path("config.toml").is_ok());
-        
+
         // Test invalid config paths
         assert!(validate_config_path("").is_err());
         assert!(validate_config_path("config.txt").is_err()); // wrong extension

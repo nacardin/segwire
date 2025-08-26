@@ -5,7 +5,7 @@ mod namespace_state;
 mod policykit;
 
 use event_loop::DaemonEventLoop;
-use segwire_common::{SegwireResult, DaemonConfig, LogConfig, LogLevel, init_logging};
+use segwire_common::{init_logging, DaemonConfig, LogConfig, LogLevel, SegwireResult};
 use std::path::PathBuf;
 use tracing::info;
 
@@ -19,7 +19,11 @@ async fn main() -> SegwireResult<()> {
 
     // Initialize logging based on configuration
     let log_config = LogConfig {
-        level: daemon_config.daemon.logging.level.parse()
+        level: daemon_config
+            .daemon
+            .logging
+            .level
+            .parse()
             .unwrap_or(LogLevel::Info),
         with_timestamps: daemon_config.daemon.logging.with_timestamps,
         with_thread_names: daemon_config.daemon.logging.with_thread_names,
@@ -28,15 +32,23 @@ async fn main() -> SegwireResult<()> {
         component: "segwire-daemon".to_string(),
     };
 
-    init_logging(log_config).map_err(|e| {
-        eprintln!("Failed to initialize logging: {}", e);
-        std::process::exit(1);
-    }).unwrap();
+    init_logging(log_config)
+        .map_err(|e| {
+            eprintln!("Failed to initialize logging: {}", e);
+            std::process::exit(1);
+        })
+        .unwrap();
 
     info!("Segwire daemon starting...");
     info!("Configuration loaded from: {}", config_path.display());
-    info!("Namespace prefix: {}", daemon_config.daemon.namespace_prefix);
-    info!("Config directory: {}", daemon_config.daemon.config_dir.display());
+    info!(
+        "Namespace prefix: {}",
+        daemon_config.daemon.namespace_prefix
+    );
+    info!(
+        "Config directory: {}",
+        daemon_config.daemon.config_dir.display()
+    );
 
     // Create and run the daemon event loop
     let daemon = DaemonEventLoop::new(config_path).await?;

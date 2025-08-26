@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Configuration management for segwire-daemon
 //!
 //! Handles loading and managing daemon configuration, including master configuration
@@ -594,7 +596,7 @@ pub enum ConfigFileEvent {
 pub struct ConfigFileMonitor {
     config_dir: PathBuf,
     debounce_duration: Duration,
-    last_events: HashMap<PathBuf, Instant>,
+    _last_events: HashMap<PathBuf, Instant>,
 }
 
 impl ConfigFileMonitor {
@@ -603,7 +605,7 @@ impl ConfigFileMonitor {
         Self {
             config_dir,
             debounce_duration,
-            last_events: HashMap::new(),
+            _last_events: HashMap::new(),
         }
     }
 
@@ -703,7 +705,7 @@ impl ConfigFileMonitor {
             }
 
             // Check for deleted files
-            for (path, _) in &known_files {
+            for path in known_files.keys() {
                 if !current_files.contains_key(path) {
                     events.push(ConfigFileEvent::Deleted(path.clone()));
                 }
@@ -774,7 +776,7 @@ impl ConfigManager {
                     info!("Master configuration file modified, reloading");
                     self.reload_master_config()?;
                     // After reloading master config, rescan all namespace configs
-                    return Ok(self.scan_namespace_configs()?);
+                    self.scan_namespace_configs()
                 } else {
                     // Handle namespace configuration file modification
                     match self.reload_namespace_config(&path) {

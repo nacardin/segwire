@@ -1,5 +1,5 @@
 //! Segwire Common Library
-//! 
+//!
 //! Shared types, utilities, and D-Bus interfaces for the segwire network namespace
 //! management system. This crate provides common functionality used by both the
 //! daemon and CLI components.
@@ -15,8 +15,8 @@ pub mod utils;
 mod logging_test;
 
 // Re-export commonly used types
-pub use error::{SegwireError, SegwireResult};
 pub use config::{DaemonConfig, NamespaceConfig};
 pub use dbus::{NamespaceState, NamespaceStatus};
-pub use logging::{LogConfig, LogContext, LogLevel, init_logging};
-pub use netlink::{NetlinkManager, NamespaceInfo, NetlinkError, RouteConfig, DnsConfig};
+pub use error::{SegwireError, SegwireResult};
+pub use logging::{init_logging, LogConfig, LogContext, LogLevel};
+pub use netlink::{DnsConfig, NamespaceInfo, NetlinkError, NetlinkManager, RouteConfig};

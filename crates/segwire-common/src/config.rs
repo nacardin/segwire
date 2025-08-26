@@ -1,16 +1,16 @@
 //! Configuration structures and parsing for segwire
-//! 
+//!
 //! Defines TOML configuration structures for both daemon and namespace
 //! configurations, with validation and environment variable substitution.
 
+use crate::error::{ConfigError, SegwireResult};
+use crate::utils::{
+    validate_cidr, validate_domain_name, validate_interface_name, validate_ip_address,
+    validate_namespace_name, validate_namespace_prefix,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use crate::error::{ConfigError, SegwireResult};
-use crate::utils::{
-    validate_interface_name, validate_namespace_name, validate_namespace_prefix,
-    validate_ip_address, validate_cidr, validate_domain_name
-};
 
 /// Master daemon configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,14 +24,14 @@ pub struct DaemonConfig {
 pub struct DaemonSettings {
     /// Namespace prefix for this daemon instance
     pub namespace_prefix: String,
-    
+
     /// Configuration directory to monitor
     pub config_dir: PathBuf,
-    
+
     /// Cleanup policy on shutdown
     #[serde(default = "default_cleanup_on_shutdown")]
     pub cleanup_on_shutdown: bool,
-    
+
     /// Logging configuration
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -43,19 +43,19 @@ pub struct LoggingConfig {
     /// Log level (trace, debug, info, warn, error)
     #[serde(default = "default_log_level")]
     pub level: String,
-    
+
     /// Include timestamps in log output
     #[serde(default = "default_with_timestamps")]
     pub with_timestamps: bool,
-    
+
     /// Include thread names in log output
     #[serde(default = "default_with_thread_names")]
     pub with_thread_names: bool,
-    
+
     /// Include file and line information
     #[serde(default = "default_with_file_line")]
     pub with_file_line: bool,
-    
+
     /// Include span information for tracing
     #[serde(default = "default_with_spans")]
     pub with_spans: bool,
@@ -79,7 +79,7 @@ pub struct DBusSettings {
     /// D-Bus service name
     #[serde(default = "default_service_name")]
     pub service_name: String,
-    
+
     /// D-Bus object path
     #[serde(default = "default_object_path")]
     pub object_path: String,
@@ -104,7 +104,7 @@ pub struct NamespaceConfig {
 pub struct NamespaceSettings {
     /// Namespace name (will be prefixed with daemon prefix)
     pub name: String,
-    
+
     /// Description for documentation
     #[serde(default)]
     pub description: String,
@@ -116,7 +116,7 @@ pub struct InterfaceConfig {
     /// Network interfaces to move into namespace
     #[serde(default)]
     pub move_interfaces: Vec<String>,
-    
+
     /// Virtual interfaces to create
     #[serde(default)]
     pub virtual_interfaces: Vec<VirtualInterface>,
@@ -135,7 +135,7 @@ pub struct VirtualInterface {
 pub struct RoutingConfig {
     /// Default gateway within namespace
     pub default_gateway: Option<String>,
-    
+
     /// Static routes
     #[serde(default)]
     pub routes: Vec<Route>,
@@ -155,7 +155,7 @@ pub struct DnsConfig {
     /// DNS servers for namespace
     #[serde(default)]
     pub servers: Vec<String>,
-    
+
     /// Search domains
     #[serde(default)]
     pub search: Vec<String>,
@@ -200,18 +200,17 @@ impl InterfaceConfig {
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate interface names to move
         for interface in &self.move_interfaces {
-            validate_interface_name(interface)
-                .map_err(|_| ConfigError::InvalidValue {
-                    field: "interfaces.move_interfaces".to_string(),
-                    value: interface.clone(),
-                })?;
+            validate_interface_name(interface).map_err(|_| ConfigError::InvalidValue {
+                field: "interfaces.move_interfaces".to_string(),
+                value: interface.clone(),
+            })?;
         }
-        
+
         // Validate virtual interfaces
         for vif in &self.virtual_interfaces {
             vif.validate()?;
         }
-        
+
         // Check for duplicate interface names
         let mut all_interfaces = self.move_interfaces.clone();
         for vif in &self.virtual_interfaces {
@@ -220,18 +219,19 @@ impl InterfaceConfig {
                 all_interfaces.push(peer.clone());
             }
         }
-        
+
         let mut sorted_interfaces = all_interfaces.clone();
         sorted_interfaces.sort();
         sorted_interfaces.dedup();
-        
+
         if sorted_interfaces.len() != all_interfaces.len() {
             return Err(ConfigError::InvalidValue {
                 field: "interfaces".to_string(),
                 value: "Duplicate interface names found".to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         Ok(())
     }
 }
@@ -240,43 +240,43 @@ impl VirtualInterface {
     /// Validate virtual interface configuration
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate interface name
-        validate_interface_name(&self.name)
-            .map_err(|_| ConfigError::InvalidValue {
-                field: "interfaces.virtual.name".to_string(),
-                value: self.name.clone(),
-            })?;
-        
+        validate_interface_name(&self.name).map_err(|_| ConfigError::InvalidValue {
+            field: "interfaces.virtual.name".to_string(),
+            value: self.name.clone(),
+        })?;
+
         // Validate interface type
         let valid_types = ["veth", "bridge", "dummy", "macvlan", "ipvlan"];
         if !valid_types.contains(&self.interface_type.as_str()) {
             return Err(ConfigError::InvalidValue {
                 field: "interfaces.virtual.type".to_string(),
                 value: self.interface_type.clone(),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Validate peer name if present
         if let Some(ref peer) = self.peer {
-            validate_interface_name(peer)
-                .map_err(|_| ConfigError::InvalidValue {
-                    field: "interfaces.virtual.peer".to_string(),
-                    value: peer.clone(),
-                })?;
-            
+            validate_interface_name(peer).map_err(|_| ConfigError::InvalidValue {
+                field: "interfaces.virtual.peer".to_string(),
+                value: peer.clone(),
+            })?;
+
             // Peer name should be different from interface name
             if peer == &self.name {
                 return Err(ConfigError::InvalidValue {
                     field: "interfaces.virtual.peer".to_string(),
                     value: "Peer name cannot be the same as interface name".to_string(),
-                }.into());
+                }
+                .into());
             }
         }
-        
+
         // veth interfaces require a peer
         if self.interface_type == "veth" && self.peer.is_none() {
             return Err(ConfigError::MissingField("interfaces.virtual.peer".to_string()).into());
         }
-        
+
         Ok(())
     }
 }
@@ -286,33 +286,31 @@ impl RoutingConfig {
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate default gateway if present
         if let Some(ref gateway) = self.default_gateway {
-            validate_ip_address(gateway)
-                .map_err(|_| ConfigError::InvalidValue {
-                    field: "routing.default_gateway".to_string(),
-                    value: gateway.clone(),
-                })?;
+            validate_ip_address(gateway).map_err(|_| ConfigError::InvalidValue {
+                field: "routing.default_gateway".to_string(),
+                value: gateway.clone(),
+            })?;
         }
-        
+
         // Validate all routes
         for (index, route) in self.routes.iter().enumerate() {
-            route.validate()
-                .map_err(|e| match e {
-                    crate::error::SegwireError::Config(config_err) => {
-                        // Enhance error message with route index
-                        match config_err {
-                            ConfigError::InvalidValue { field, value } => {
-                                crate::error::SegwireError::Config(ConfigError::InvalidValue {
-                                    field: format!("routing.routes[{}].{}", index, field),
-                                    value,
-                                })
-                            }
-                            other => crate::error::SegwireError::Config(other),
+            route.validate().map_err(|e| match e {
+                crate::error::SegwireError::Config(config_err) => {
+                    // Enhance error message with route index
+                    match config_err {
+                        ConfigError::InvalidValue { field, value } => {
+                            crate::error::SegwireError::Config(ConfigError::InvalidValue {
+                                field: format!("routing.routes[{}].{}", index, field),
+                                value,
+                            })
                         }
+                        other => crate::error::SegwireError::Config(other),
                     }
-                    other => other,
-                })?;
+                }
+                other => other,
+            })?;
         }
-        
+
         // Check for duplicate routes (same destination)
         let mut destinations: Vec<&String> = self.routes.iter().map(|r| &r.destination).collect();
         destinations.sort();
@@ -321,10 +319,11 @@ impl RoutingConfig {
                 return Err(ConfigError::InvalidValue {
                     field: "routing.routes".to_string(),
                     value: format!("Duplicate route destination: {}", window[0]),
-                }.into());
+                }
+                .into());
             }
         }
-        
+
         Ok(())
     }
 }
@@ -333,29 +332,28 @@ impl Route {
     /// Validate individual route configuration
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate destination CIDR
-        validate_cidr(&self.destination)
-            .map_err(|_| ConfigError::InvalidValue {
-                field: "destination".to_string(),
-                value: self.destination.clone(),
-            })?;
-        
+        validate_cidr(&self.destination).map_err(|_| ConfigError::InvalidValue {
+            field: "destination".to_string(),
+            value: self.destination.clone(),
+        })?;
+
         // Validate gateway IP
-        validate_ip_address(&self.gateway)
-            .map_err(|_| ConfigError::InvalidValue {
-                field: "gateway".to_string(),
-                value: self.gateway.clone(),
-            })?;
-        
+        validate_ip_address(&self.gateway).map_err(|_| ConfigError::InvalidValue {
+            field: "gateway".to_string(),
+            value: self.gateway.clone(),
+        })?;
+
         // Validate metric if present
         if let Some(metric) = self.metric {
             if metric == 0 {
                 return Err(ConfigError::InvalidValue {
                     field: "metric".to_string(),
                     value: "Route metric cannot be zero".to_string(),
-                }.into());
+                }
+                .into());
             }
         }
-        
+
         Ok(())
     }
 }
@@ -365,22 +363,20 @@ impl DnsConfig {
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate DNS servers
         for (index, server) in self.servers.iter().enumerate() {
-            validate_ip_address(server)
-                .map_err(|_| ConfigError::InvalidValue {
-                    field: format!("dns.servers[{}]", index),
-                    value: server.clone(),
-                })?;
+            validate_ip_address(server).map_err(|_| ConfigError::InvalidValue {
+                field: format!("dns.servers[{}]", index),
+                value: server.clone(),
+            })?;
         }
-        
+
         // Validate search domains
         for (index, domain) in self.search.iter().enumerate() {
-            validate_domain_name(domain)
-                .map_err(|_| ConfigError::InvalidValue {
-                    field: format!("dns.search[{}]", index),
-                    value: domain.clone(),
-                })?;
+            validate_domain_name(domain).map_err(|_| ConfigError::InvalidValue {
+                field: format!("dns.search[{}]", index),
+                value: domain.clone(),
+            })?;
         }
-        
+
         // Check for duplicate DNS servers
         let mut sorted_servers = self.servers.clone();
         sorted_servers.sort();
@@ -389,9 +385,10 @@ impl DnsConfig {
             return Err(ConfigError::InvalidValue {
                 field: "dns.servers".to_string(),
                 value: "Duplicate DNS servers found".to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Check for duplicate search domains
         let mut sorted_domains = self.search.clone();
         sorted_domains.sort();
@@ -400,14 +397,13 @@ impl DnsConfig {
             return Err(ConfigError::InvalidValue {
                 field: "dns.search".to_string(),
                 value: "Duplicate search domains found".to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         Ok(())
     }
 }
-
-
 
 impl LoggingConfig {
     /// Validate logging configuration
@@ -418,9 +414,10 @@ impl LoggingConfig {
             return Err(ConfigError::InvalidValue {
                 field: "logging.level".to_string(),
                 value: self.level.clone(),
-            }.into());
+            }
+            .into());
         }
-        
+
         Ok(())
     }
 }
@@ -430,45 +427,47 @@ impl DaemonConfig {
     pub fn from_file(path: &std::path::Path) -> SegwireResult<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|_| ConfigError::FileNotFound(path.display().to_string()))?;
-        
-        let config: DaemonConfig = toml::from_str(&content)
-            .map_err(ConfigError::InvalidToml)?;
+
+        let config: DaemonConfig = toml::from_str(&content).map_err(ConfigError::InvalidToml)?;
         config.validate()?;
         Ok(config)
     }
-    
+
     /// Validate daemon configuration
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate namespace prefix
         validate_namespace_prefix(&self.daemon.namespace_prefix)?;
-        
+
         // Validate config directory exists
         if !self.daemon.config_dir.exists() {
             return Err(ConfigError::InvalidValue {
                 field: "config_dir".to_string(),
                 value: self.daemon.config_dir.display().to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Validate logging configuration
         self.daemon.logging.validate()?;
-        
+
         // Validate D-Bus service name format
         if !self.dbus.service_name.contains('.') || self.dbus.service_name.starts_with('.') {
             return Err(ConfigError::InvalidValue {
                 field: "service_name".to_string(),
                 value: self.dbus.service_name.clone(),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Validate D-Bus object path format
         if !self.dbus.object_path.starts_with('/') {
             return Err(ConfigError::InvalidValue {
                 field: "object_path".to_string(),
                 value: self.dbus.object_path.clone(),
-            }.into());
+            }
+            .into());
         }
-        
+
         Ok(())
     }
 }
@@ -478,27 +477,28 @@ impl NamespaceConfig {
     pub fn from_file(path: &std::path::Path) -> SegwireResult<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|_| ConfigError::FileNotFound(path.display().to_string()))?;
-        
-        let mut config: NamespaceConfig = toml::from_str(&content)
-            .map_err(ConfigError::InvalidToml)?;
+
+        let mut config: NamespaceConfig =
+            toml::from_str(&content).map_err(ConfigError::InvalidToml)?;
         config.substitute_environment_variables()?;
         config.validate()?;
         Ok(config)
     }
-    
+
     /// Substitute environment variables in configuration values
     pub fn substitute_environment_variables(&mut self) -> SegwireResult<()> {
         use crate::utils::substitute_env_vars;
-        
+
         // Substitute in namespace settings
         self.namespace.name = substitute_env_vars(&self.namespace.name, &self.environment)?;
-        self.namespace.description = substitute_env_vars(&self.namespace.description, &self.environment)?;
-        
+        self.namespace.description =
+            substitute_env_vars(&self.namespace.description, &self.environment)?;
+
         // Substitute in interface configuration
         for interface in &mut self.interfaces.move_interfaces {
             *interface = substitute_env_vars(interface, &self.environment)?;
         }
-        
+
         for vif in &mut self.interfaces.virtual_interfaces {
             vif.name = substitute_env_vars(&vif.name, &self.environment)?;
             vif.interface_type = substitute_env_vars(&vif.interface_type, &self.environment)?;
@@ -506,51 +506,51 @@ impl NamespaceConfig {
                 *peer = substitute_env_vars(peer, &self.environment)?;
             }
         }
-        
+
         // Substitute in routing configuration
         if let Some(ref mut gateway) = self.routing.default_gateway {
             *gateway = substitute_env_vars(gateway, &self.environment)?;
         }
-        
+
         for route in &mut self.routing.routes {
             route.destination = substitute_env_vars(&route.destination, &self.environment)?;
             route.gateway = substitute_env_vars(&route.gateway, &self.environment)?;
         }
-        
+
         // Substitute in DNS configuration
         for server in &mut self.dns.servers {
             *server = substitute_env_vars(server, &self.environment)?;
         }
-        
+
         for domain in &mut self.dns.search {
             *domain = substitute_env_vars(domain, &self.environment)?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Validate namespace configuration
     pub fn validate(&self) -> SegwireResult<()> {
         // Validate namespace settings
         self.validate_namespace_settings()?;
-        
+
         // Validate interface configuration
         self.interfaces.validate()?;
-        
+
         // Validate routing configuration
         self.routing.validate()?;
-        
+
         // Validate DNS configuration
         self.dns.validate()?;
-        
+
         Ok(())
     }
-    
+
     /// Validate namespace-specific settings
     fn validate_namespace_settings(&self) -> SegwireResult<()> {
         // Validate namespace name
         validate_namespace_name(&self.namespace.name)?;
-        
+
         Ok(())
     }
 }
@@ -586,8 +586,8 @@ mod tests {
         assert!(toml_str.contains("service_name = \"org.test.Service\""));
 
         // Test deserialization
-        let deserialized: DaemonConfig = toml::from_str(&toml_str)
-            .expect("Failed to deserialize config");
+        let deserialized: DaemonConfig =
+            toml::from_str(&toml_str).expect("Failed to deserialize config");
         assert_eq!(deserialized.daemon.namespace_prefix, "test");
         assert_eq!(deserialized.dbus.service_name, "org.test.Service");
     }
@@ -632,11 +632,14 @@ mod tests {
         assert!(toml_str.contains("default_gateway = \"192.168.100.1\""));
 
         // Test deserialization
-        let deserialized: NamespaceConfig = toml::from_str(&toml_str)
-            .expect("Failed to deserialize config");
+        let deserialized: NamespaceConfig =
+            toml::from_str(&toml_str).expect("Failed to deserialize config");
         assert_eq!(deserialized.namespace.name, "test-app");
         assert_eq!(deserialized.interfaces.move_interfaces, vec!["eth1"]);
-        assert_eq!(deserialized.routing.default_gateway, Some("192.168.100.1".to_string()));
+        assert_eq!(
+            deserialized.routing.default_gateway,
+            Some("192.168.100.1".to_string())
+        );
     }
 
     #[test]
@@ -649,11 +652,11 @@ config_dir = "/tmp"
 [dbus]
 "#;
 
-        let config: DaemonConfig = toml::from_str(minimal_toml)
-            .expect("Failed to parse minimal config");
-        
+        let config: DaemonConfig =
+            toml::from_str(minimal_toml).expect("Failed to parse minimal config");
+
         // Check defaults are applied
-        assert_eq!(config.daemon.cleanup_on_shutdown, true);
+        assert!(config.daemon.cleanup_on_shutdown);
         assert_eq!(config.daemon.logging.level, "info");
         assert_eq!(config.dbus.service_name, "org.segwire.NamespaceManager");
         assert_eq!(config.dbus.object_path, "/org/segwire/NamespaceManager");
@@ -878,9 +881,21 @@ config_dir = "/tmp"
         assert_eq!(config.namespace.name, "test-app");
         assert_eq!(config.namespace.description, "Namespace for test-app");
         assert_eq!(config.interfaces.move_interfaces[0], "test-app-eth0");
-        assert_eq!(config.interfaces.virtual_interfaces[0].name, "veth-test-app");
-        assert_eq!(config.interfaces.virtual_interfaces[0].peer.as_ref().unwrap(), "veth-test-app-host");
-        assert_eq!(config.routing.default_gateway.as_ref().unwrap(), "192.168.100.1");
+        assert_eq!(
+            config.interfaces.virtual_interfaces[0].name,
+            "veth-test-app"
+        );
+        assert_eq!(
+            config.interfaces.virtual_interfaces[0]
+                .peer
+                .as_ref()
+                .unwrap(),
+            "veth-test-app-host"
+        );
+        assert_eq!(
+            config.routing.default_gateway.as_ref().unwrap(),
+            "192.168.100.1"
+        );
         assert_eq!(config.routing.routes[0].gateway, "192.168.100.1");
         assert_eq!(config.dns.servers[0], "8.8.8.8");
         assert_eq!(config.dns.search[0], "test-app.local");
@@ -918,7 +933,10 @@ config_dir = "/tmp"
         assert_eq!(config.namespace.name, "set_value");
         assert_eq!(config.namespace.description, "default_description");
         assert_eq!(config.interfaces.move_interfaces[0], "eth0");
-        assert_eq!(config.routing.default_gateway.as_ref().unwrap(), "192.168.1.1");
+        assert_eq!(
+            config.routing.default_gateway.as_ref().unwrap(),
+            "192.168.1.1"
+        );
         assert_eq!(config.dns.servers[0], "8.8.8.8");
     }
 
@@ -940,7 +958,10 @@ config_dir = "/tmp"
         // Should fail with missing variable
         let result = config.substitute_environment_variables();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Environment variable 'MISSING_VAR' not found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Environment variable 'MISSING_VAR' not found"));
     }
 
     #[test]
@@ -975,7 +996,10 @@ config_dir = "/tmp"
 
         // Config environment should take precedence
         let mut env_vars = HashMap::new();
-        env_vars.insert("SEGWIRE_TEST_PRECEDENCE_VAR".to_string(), "config_value".to_string());
+        env_vars.insert(
+            "SEGWIRE_TEST_PRECEDENCE_VAR".to_string(),
+            "config_value".to_string(),
+        );
 
         let mut config = NamespaceConfig {
             namespace: NamespaceSettings {

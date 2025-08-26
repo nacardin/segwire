@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{LogConfig, LogLevel, LogContext, init_logging};
+
+    use crate::{init_logging, LogConfig, LogContext, LogLevel};
     use std::path::PathBuf;
 
     #[test]
@@ -40,6 +40,9 @@ mod tests {
         assert_eq!(ctx.namespace, Some("test-ns".to_string()));
         assert_eq!(ctx.config_path, Some(PathBuf::from("/test/config.toml")));
         assert_eq!(ctx.user_id, Some(1000));
-        assert_eq!(ctx.fields.get("test_field"), Some(&"test_value".to_string()));
+        assert_eq!(
+            ctx.fields.get("test_field"),
+            Some(&"test_value".to_string())
+        );
     }
 }

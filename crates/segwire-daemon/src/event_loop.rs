@@ -1,19 +1,22 @@
+#![allow(dead_code)]
+
 //! Event loop coordination for the segwire daemon
-//! 
+//!
 //! This module provides the main event loop implementation that coordinates
 //! between configuration monitoring, D-Bus service, and graceful shutdown handling.
-//! 
+//!
 //! The event loop uses monoio runtime with io_uring support for high-performance
 //! asynchronous I/O operations.
 
-use crate::config::{ConfigManager, ConfigFileEvent};
+use crate::config::{ConfigFileEvent, ConfigManager};
 use crate::dbus_service::DbusService;
 use crate::namespace_state::NamespaceStateManager;
-use segwire_common::{SegwireResult, LogContext, log_info, log_warn, log_error, log_debug};
+use async_lock::Mutex;
+use segwire_common::{log_info, LogContext, SegwireResult};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{error, info, warn, debug};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 /// Check if the daemon has the required capabilities
 fn check_capabilities() -> SegwireResult<()> {
@@ -33,7 +36,7 @@ fn check_capabilities() -> SegwireResult<()> {
 }
 
 /// Main daemon event loop coordinator
-/// 
+///
 /// This struct coordinates between different daemon components:
 /// - Configuration file monitoring with io_uring-based file watching
 /// - D-Bus service for CLI communication
@@ -48,16 +51,15 @@ pub struct DaemonEventLoop {
 
 impl DaemonEventLoop {
     /// Create a new daemon event loop
-    /// 
+    ///
     /// # Arguments
     /// * `config_path` - Path to the master daemon configuration file
-    /// 
+    ///
     /// # Returns
     /// A new `DaemonEventLoop` instance ready to run
     pub async fn new(config_path: PathBuf) -> SegwireResult<Self> {
-        let ctx = LogContext::new("daemon_initialization")
-            .with_config_path(config_path.clone());
-        
+        let ctx = LogContext::new("daemon_initialization").with_config_path(config_path.clone());
+
         log_info!(ctx, "Initializing daemon event loop");
 
         // Check for required capabilities
@@ -69,11 +71,12 @@ impl DaemonEventLoop {
 
         // Get configuration values for D-Bus service initialization
         let (config_dir, namespace_prefix) = {
-            let manager = config_manager.lock().unwrap();
+            let manager = config_manager.lock().await;
             (manager.get_config_dir(), manager.get_namespace_prefix())
         };
 
-        let ctx = ctx.with_field("namespace_prefix", namespace_prefix.clone())
+        let ctx = ctx
+            .with_field("namespace_prefix", namespace_prefix.clone())
             .with_field("config_dir", config_dir.display().to_string());
 
         // Initialize D-Bus service
@@ -96,19 +99,19 @@ impl DaemonEventLoop {
     }
 
     /// Run the main event loop with task coordination
-    /// 
+    ///
     /// This method starts all daemon tasks and coordinates their execution:
     /// 1. Configuration file monitoring task
     /// 2. D-Bus service task
     /// 3. Signal handling task
-    /// 
+    ///
     /// The event loop runs until a shutdown signal is received or a critical task fails.
     pub async fn run(&self) -> SegwireResult<()> {
         info!("Starting daemon event loop with task coordination");
 
         // Perform initial configuration scan
         {
-            let mut manager = self.config_manager.lock().unwrap();
+            let mut manager = self.config_manager.lock().await;
             if let Err(e) = manager.scan_namespace_configs() {
                 error!("Initial configuration scan failed: {}", e);
                 return Err(e);
@@ -117,7 +120,7 @@ impl DaemonEventLoop {
 
         // Start configuration file monitoring
         let config_event_receiver = {
-            let mut manager = self.config_manager.lock().unwrap();
+            let mut manager = self.config_manager.lock().await;
             manager.start_file_monitoring().await?
         };
 
@@ -137,7 +140,7 @@ impl DaemonEventLoop {
 
         // Wait for shutdown signal or task completion
         let shutdown_signal = self.shutdown_signal.clone();
-        
+
         // Main coordination loop
         loop {
             // Check if shutdown was requested
@@ -179,7 +182,7 @@ impl DaemonEventLoop {
     }
 
     /// Spawn configuration monitoring task
-    /// 
+    ///
     /// This task monitors configuration file changes using io_uring-based file watching
     /// and handles configuration updates by coordinating with the D-Bus service.
     fn spawn_config_monitoring_task(
@@ -205,10 +208,10 @@ impl DaemonEventLoop {
                 match config_event_receiver.try_recv() {
                     Ok(event) => {
                         debug!("Processing configuration file event: {:?}", event);
-                        
+
                         // Handle the configuration file event
                         let affected_namespaces = {
-                            let mut manager = config_manager.lock().unwrap();
+                            let mut manager = config_manager.lock().await;
                             match manager.handle_file_event(event).await {
                                 Ok(namespaces) => namespaces,
                                 Err(e) => {
@@ -220,28 +223,41 @@ impl DaemonEventLoop {
 
                         // Trigger immediate state synchronization for affected namespaces
                         if !affected_namespaces.is_empty() {
-                            debug!("Configuration change detected, triggering state synchronization");
-                            
-                            let config_mgr = config_manager.lock().unwrap();
-                            let mut state_mgr = state_manager.lock().unwrap();
-                            
+                            debug!(
+                                "Configuration change detected, triggering state synchronization"
+                            );
+
+                            let config_mgr = config_manager.lock().await;
+                            let mut state_mgr = state_manager.lock().await;
+
                             match state_mgr.force_sync(&config_mgr).await {
                                 Ok(result) => {
                                     // Emit D-Bus signals for state changes
                                     for namespace in &result.created {
-                                        if let Err(e) = dbus_service.emit_namespace_created(namespace, "config_change").await {
+                                        if let Err(e) = dbus_service
+                                            .emit_namespace_created(namespace, "config_change")
+                                            .await
+                                        {
                                             warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
                                         }
                                     }
-                                    
+
                                     for namespace in &result.deleted {
-                                        if let Err(e) = dbus_service.emit_namespace_deleted(namespace, "config_change").await {
+                                        if let Err(e) = dbus_service
+                                            .emit_namespace_deleted(namespace, "config_change")
+                                            .await
+                                        {
                                             warn!("Failed to emit namespace deleted signal for {}: {}", namespace, e);
                                         }
                                     }
-                                    
+
                                     for namespace in &result.updated {
-                                        if let Err(e) = dbus_service.emit_namespace_status_changed(namespace, "unknown", "updated").await {
+                                        if let Err(e) = dbus_service
+                                            .emit_namespace_status_changed(
+                                                namespace, "unknown", "updated",
+                                            )
+                                            .await
+                                        {
                                             warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
                                         }
                                     }
@@ -270,7 +286,7 @@ impl DaemonEventLoop {
     }
 
     /// Spawn D-Bus service task
-    /// 
+    ///
     /// This task monitors the D-Bus service and handles shutdown coordination.
     /// The actual D-Bus request handling is done automatically by zbus.
     fn spawn_dbus_service_task(&self) -> monoio::task::JoinHandle<()> {
@@ -298,7 +314,7 @@ impl DaemonEventLoop {
     }
 
     /// Spawn state synchronization task
-    /// 
+    ///
     /// This task periodically synchronizes the in-memory namespace state
     /// with the actual system state and configuration files.
     fn spawn_state_synchronization_task(&self) -> monoio::task::JoinHandle<()> {
@@ -312,25 +328,33 @@ impl DaemonEventLoop {
 
             // Perform initial state synchronization
             {
-                let config_mgr = config_manager.lock().unwrap();
-                let mut state_mgr = state_manager.lock().unwrap();
-                
+                let config_mgr = config_manager.lock().await;
+                let mut state_mgr = state_manager.lock().await;
+
                 match state_mgr.force_sync(&config_mgr).await {
                     Ok(result) => {
                         info!("Initial state synchronization completed: {} created, {} updated, {} conflicts", 
                               result.created.len(), result.updated.len(), result.conflicts.len());
-                        
+
                         // Emit D-Bus signals for created namespaces
                         for namespace in &result.created {
-                            if let Err(e) = dbus_service.emit_namespace_created(namespace, "initial_sync").await {
-                                warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
+                            if let Err(e) = dbus_service
+                                .emit_namespace_created(namespace, "initial_sync")
+                                .await
+                            {
+                                warn!(
+                                    "Failed to emit namespace created signal for {}: {}",
+                                    namespace, e
+                                );
                             }
                         }
-                        
+
                         // Log conflicts for manual resolution
                         for conflict in &result.conflicts {
-                            warn!("State conflict detected: {} - {} (resolution: {:?})", 
-                                  conflict.namespace_name, conflict.description, conflict.resolution);
+                            warn!(
+                                "State conflict detected: {} - {} (resolution: {:?})",
+                                conflict.namespace_name, conflict.description, conflict.resolution
+                            );
                         }
                     }
                     Err(e) => {
@@ -350,38 +374,56 @@ impl DaemonEventLoop {
 
                 // Check if synchronization is needed
                 let needs_sync = {
-                    let state_mgr = state_manager.lock().unwrap();
+                    let state_mgr = state_manager.lock().await;
                     state_mgr.needs_sync()
                 };
 
                 if needs_sync {
                     debug!("Performing periodic state synchronization");
-                    
-                    let config_mgr = config_manager.lock().unwrap();
-                    let mut state_mgr = state_manager.lock().unwrap();
-                    
+
+                    let config_mgr = config_manager.lock().await;
+                    let mut state_mgr = state_manager.lock().await;
+
                     match state_mgr.synchronize_state(&config_mgr).await {
                         Ok(result) => {
-                            if !result.created.is_empty() || !result.updated.is_empty() || 
-                               !result.deleted.is_empty() || !result.conflicts.is_empty() {
+                            if !result.created.is_empty()
+                                || !result.updated.is_empty()
+                                || !result.deleted.is_empty()
+                                || !result.conflicts.is_empty()
+                            {
                                 info!("State synchronization completed: {} created, {} updated, {} deleted, {} conflicts", 
                                       result.created.len(), result.updated.len(), result.deleted.len(), result.conflicts.len());
-                                
+
                                 // Emit D-Bus signals for state changes
                                 for namespace in &result.created {
-                                    if let Err(e) = dbus_service.emit_namespace_created(namespace, "sync").await {
-                                        warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
+                                    if let Err(e) =
+                                        dbus_service.emit_namespace_created(namespace, "sync").await
+                                    {
+                                        warn!(
+                                            "Failed to emit namespace created signal for {}: {}",
+                                            namespace, e
+                                        );
                                     }
                                 }
-                                
+
                                 for namespace in &result.deleted {
-                                    if let Err(e) = dbus_service.emit_namespace_deleted(namespace, "sync").await {
-                                        warn!("Failed to emit namespace deleted signal for {}: {}", namespace, e);
+                                    if let Err(e) =
+                                        dbus_service.emit_namespace_deleted(namespace, "sync").await
+                                    {
+                                        warn!(
+                                            "Failed to emit namespace deleted signal for {}: {}",
+                                            namespace, e
+                                        );
                                     }
                                 }
-                                
+
                                 for namespace in &result.updated {
-                                    if let Err(e) = dbus_service.emit_namespace_status_changed(namespace, "unknown", "updated").await {
+                                    if let Err(e) = dbus_service
+                                        .emit_namespace_status_changed(
+                                            namespace, "unknown", "updated",
+                                        )
+                                        .await
+                                    {
                                         warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
                                     }
                                 }
@@ -397,8 +439,8 @@ impl DaemonEventLoop {
                 maintenance_counter += 1;
                 if maintenance_counter >= 10 {
                     maintenance_counter = 0;
-                    
-                    let mut state_mgr = state_manager.lock().unwrap();
+
+                    let mut state_mgr = state_manager.lock().await;
                     if let Err(e) = state_mgr.perform_maintenance().await {
                         warn!("State maintenance failed: {}", e);
                     }
@@ -413,7 +455,7 @@ impl DaemonEventLoop {
     }
 
     /// Spawn signal handling task for graceful shutdown
-    /// 
+    ///
     /// This task handles system signals (SIGTERM, SIGINT) for graceful shutdown.
     /// In the current implementation, it's a placeholder that can be extended
     /// with proper signal handling.
@@ -451,7 +493,7 @@ impl DaemonEventLoop {
     }
 
     /// Perform graceful shutdown with cleanup
-    /// 
+    ///
     /// This method handles the graceful shutdown sequence:
     /// 1. Sets shutdown signal to stop all tasks
     /// 2. Optionally cleans up managed namespaces
@@ -464,29 +506,37 @@ impl DaemonEventLoop {
 
         // Check if we should cleanup namespaces on shutdown
         let should_cleanup = {
-            let manager = self.config_manager.lock().unwrap();
+            let manager = self.config_manager.lock().await;
             manager.should_cleanup_on_shutdown()
         };
 
         if should_cleanup {
             info!("Performing namespace cleanup on shutdown");
-            
+
             // Get list of managed namespaces
             let managed_namespaces = {
-                let manager = self.config_manager.lock().unwrap();
-                manager.namespace_configs().keys().cloned().collect::<Vec<_>>()
+                let manager = self.config_manager.lock().await;
+                manager
+                    .namespace_configs()
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
             };
 
             // Cleanup each managed namespace
             for namespace_name in managed_namespaces {
                 info!("Cleaning up namespace: {}", namespace_name);
-                
+
                 // Emit deletion signal
-                if let Err(e) = self.dbus_service.emit_namespace_deleted(
-                    &namespace_name,
-                    "daemon_shutdown"
-                ).await {
-                    warn!("Failed to emit namespace deletion signal for {}: {}", namespace_name, e);
+                if let Err(e) = self
+                    .dbus_service
+                    .emit_namespace_deleted(&namespace_name, "daemon_shutdown")
+                    .await
+                {
+                    warn!(
+                        "Failed to emit namespace deletion signal for {}: {}",
+                        namespace_name, e
+                    );
                 }
 
                 // TODO: Implement actual namespace cleanup using netlink
@@ -494,7 +544,10 @@ impl DaemonEventLoop {
                 // 1. Moving interfaces back to default namespace
                 // 2. Deleting the network namespace
                 // 3. Cleaning up any associated resources
-                debug!("Namespace cleanup for {} completed (placeholder)", namespace_name);
+                debug!(
+                    "Namespace cleanup for {} completed (placeholder)",
+                    namespace_name
+                );
             }
 
             info!("Namespace cleanup completed");
@@ -503,11 +556,11 @@ impl DaemonEventLoop {
         }
 
         // Emit final D-Bus signal
-        if let Err(e) = self.dbus_service.emit_operation_progress(
-            "daemon_shutdown",
-            1.0,
-            "Daemon shutdown completed"
-        ).await {
+        if let Err(e) = self
+            .dbus_service
+            .emit_operation_progress("daemon_shutdown", 1.0, "Daemon shutdown completed")
+            .await
+        {
             warn!("Failed to emit shutdown completion signal: {}", e);
         }
 
@@ -516,7 +569,7 @@ impl DaemonEventLoop {
     }
 
     /// Request shutdown from external signal
-    /// 
+    ///
     /// This method can be called from signal handlers or other external
     /// sources to request a graceful shutdown of the daemon.
     pub fn request_shutdown(&self) {
@@ -548,13 +601,14 @@ object_path = "/org/segwire/NamespaceManager"
             namespace_prefix,
             temp_dir.path().join("namespaces").display()
         );
-        
+
         let config_path = temp_dir.path().join("daemon.toml");
         fs::write(&config_path, config_content).expect("Failed to write test config");
-        
+
         // Create the namespaces directory
-        fs::create_dir_all(temp_dir.path().join("namespaces")).expect("Failed to create namespaces dir");
-        
+        fs::create_dir_all(temp_dir.path().join("namespaces"))
+            .expect("Failed to create namespaces dir");
+
         config_path
     }
 
@@ -567,10 +621,10 @@ object_path = "/org/segwire/NamespaceManager"
 
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "test");
-        
+
         // Test that we can create a daemon event loop
         let result = DaemonEventLoop::new(config_path).await;
-        
+
         // The creation might fail due to D-Bus system bus not being available in test environment
         // but we can at least verify the basic structure works
         match result {

@@ -1,5 +1,7 @@
+#![allow(dead_code)]
+
 //! PolicyKit integration for D-Bus authorization
-//! 
+//!
 //! Provides authorization checking for D-Bus method calls using PolicyKit,
 //! ensuring that only authorized users can perform privileged operations.
 
@@ -10,7 +12,7 @@ use zbus::Connection;
 
 /// PolicyKit authorization checker
 pub struct PolicyKitAuthorizer {
-    connection: Connection,
+    _connection: Connection,
     action_mappings: HashMap<String, String>,
 }
 
@@ -18,31 +20,50 @@ impl PolicyKitAuthorizer {
     /// Create a new PolicyKit authorizer
     pub fn new(connection: Connection) -> Self {
         let mut action_mappings = HashMap::new();
-        
+
         // Map D-Bus method names to PolicyKit actions
-        action_mappings.insert("list".to_string(), "org.segwire.namespace.status".to_string());
-        action_mappings.insert("status".to_string(), "org.segwire.namespace.status".to_string());
-        action_mappings.insert("create".to_string(), "org.segwire.namespace.create".to_string());
-        action_mappings.insert("delete".to_string(), "org.segwire.namespace.delete".to_string());
-        action_mappings.insert("restart".to_string(), "org.segwire.namespace.delete".to_string());
-        action_mappings.insert("reload".to_string(), "org.segwire.namespace.manage".to_string());
-        action_mappings.insert("validate".to_string(), "org.segwire.namespace.status".to_string());
+        action_mappings.insert(
+            "list".to_string(),
+            "org.segwire.namespace.status".to_string(),
+        );
+        action_mappings.insert(
+            "status".to_string(),
+            "org.segwire.namespace.status".to_string(),
+        );
+        action_mappings.insert(
+            "create".to_string(),
+            "org.segwire.namespace.create".to_string(),
+        );
+        action_mappings.insert(
+            "delete".to_string(),
+            "org.segwire.namespace.delete".to_string(),
+        );
+        action_mappings.insert(
+            "restart".to_string(),
+            "org.segwire.namespace.delete".to_string(),
+        );
+        action_mappings.insert(
+            "reload".to_string(),
+            "org.segwire.namespace.manage".to_string(),
+        );
+        action_mappings.insert(
+            "validate".to_string(),
+            "org.segwire.namespace.status".to_string(),
+        );
 
         Self {
-            connection,
+            _connection: connection,
             action_mappings,
         }
     }
 
     /// Check if the calling user is authorized for the given action
-    pub async fn check_authorization(
-        &self,
-        action: &str,
-    ) -> Result<(), SegwireError> {
+    pub async fn check_authorization(&self, action: &str) -> Result<(), SegwireError> {
         debug!("Checking PolicyKit authorization for action: {}", action);
 
         // Get the PolicyKit action ID for this operation
-        let action_id = self.action_mappings
+        let action_id = self
+            .action_mappings
             .get(action)
             .ok_or_else(|| SegwireError::Permission(format!("Unknown action: {}", action)))?;
 
@@ -52,7 +73,7 @@ impl PolicyKitAuthorizer {
         // 1. Get the process ID and user ID of the sender from D-Bus context
         // 2. Call PolicyKit's CheckAuthorization method
         // 3. Handle the response and any interactive authentication
-        
+
         // For now, we'll implement a basic check that allows operations
         // but logs the authorization attempt
         match self.check_basic_authorization(action_id).await {
@@ -80,23 +101,34 @@ impl PolicyKitAuthorizer {
 
         // For development purposes, we'll allow all operations but log them
         // In production, this should be replaced with actual PolicyKit calls
-        info!("Authorization check passed (development mode) - action: {}", action_id);
-        
+        info!(
+            "Authorization check passed (development mode) - action: {}",
+            action_id
+        );
+
         Ok(())
     }
 
     /// Get the process information for a D-Bus sender
-    async fn get_sender_process_info(&self, sender: &zbus::names::BusName<'_>) -> Result<ProcessInfo, SegwireError> {
+    async fn get_sender_process_info(
+        &self,
+        sender: &zbus::names::BusName<'_>,
+    ) -> Result<ProcessInfo, SegwireError> {
         debug!("Getting process info for D-Bus sender: {}", sender);
 
         // Use D-Bus to get the process ID of the sender
-        let dbus_proxy = zbus::fdo::DBusProxy::new(&self.connection).await
-            .map_err(|e| SegwireError::DBus(e))?;
+        let dbus_proxy = zbus::fdo::DBusProxy::new(&self._connection)
+            .await
+            .map_err(SegwireError::DBus)?;
 
-        let pid = dbus_proxy.get_connection_unix_process_id(sender.into()).await
+        let pid = dbus_proxy
+            .get_connection_unix_process_id(sender.into())
+            .await
             .map_err(|e| SegwireError::DBus(e.into()))?;
 
-        let uid = dbus_proxy.get_connection_unix_user(sender.into()).await
+        let uid = dbus_proxy
+            .get_connection_unix_user(sender.into())
+            .await
             .map_err(|e| SegwireError::DBus(e.into()))?;
 
         debug!("Sender '{}' has PID {} and UID {}", sender, pid, uid);
@@ -110,8 +142,10 @@ impl PolicyKitAuthorizer {
         process_info: &ProcessInfo,
         action_id: &str,
     ) -> Result<AuthorizationResult, SegwireError> {
-        debug!("Calling PolicyKit CheckAuthorization for PID {} and action '{}'", 
-               process_info.pid, action_id);
+        debug!(
+            "Calling PolicyKit CheckAuthorization for PID {} and action '{}'",
+            process_info.pid, action_id
+        );
 
         // TODO: Implement actual PolicyKit D-Bus call
         // This would involve calling:
@@ -148,16 +182,16 @@ enum AuthorizationResult {
 pub mod actions {
     /// View namespace status and list namespaces
     pub const STATUS: &str = "org.segwire.namespace.status";
-    
+
     /// Create new namespaces
     pub const CREATE: &str = "org.segwire.namespace.create";
-    
+
     /// Delete existing namespaces
     pub const DELETE: &str = "org.segwire.namespace.delete";
-    
+
     /// Manage daemon configuration and reload
     pub const MANAGE: &str = "org.segwire.namespace.manage";
-    
+
     /// Administrative operations (full access)
     pub const ADMIN: &str = "org.segwire.namespace.admin";
 }
@@ -230,8 +264,8 @@ mod tests {
 
     #[monoio::test]
     async fn test_action_mappings() {
-        let connection = Connection::system().await.unwrap();
-        let authorizer = PolicyKitAuthorizer::new(connection);
+        let _connection = Connection::system().await.unwrap();
+        let authorizer = PolicyKitAuthorizer::new(_connection);
 
         // Test that all expected actions are mapped
         assert!(authorizer.action_mappings.contains_key("list"));
@@ -243,16 +277,31 @@ mod tests {
         assert!(authorizer.action_mappings.contains_key("validate"));
 
         // Test specific mappings
-        assert_eq!(authorizer.action_mappings.get("create").unwrap(), "org.segwire.namespace.create");
-        assert_eq!(authorizer.action_mappings.get("delete").unwrap(), "org.segwire.namespace.delete");
-        assert_eq!(authorizer.action_mappings.get("status").unwrap(), "org.segwire.namespace.status");
+        assert_eq!(
+            authorizer.action_mappings.get("create").unwrap(),
+            "org.segwire.namespace.create"
+        );
+        assert_eq!(
+            authorizer.action_mappings.get("delete").unwrap(),
+            "org.segwire.namespace.delete"
+        );
+        assert_eq!(
+            authorizer.action_mappings.get("status").unwrap(),
+            "org.segwire.namespace.status"
+        );
     }
 
     #[test]
     fn test_authorization_result() {
-        assert_eq!(AuthorizationResult::Authorized, AuthorizationResult::Authorized);
-        assert_ne!(AuthorizationResult::Authorized, AuthorizationResult::NotAuthorized);
-        
+        assert_eq!(
+            AuthorizationResult::Authorized,
+            AuthorizationResult::Authorized
+        );
+        assert_ne!(
+            AuthorizationResult::Authorized,
+            AuthorizationResult::NotAuthorized
+        );
+
         match AuthorizationResult::Failed("test".to_string()) {
             AuthorizationResult::Failed(msg) => assert_eq!(msg, "test"),
             _ => panic!("Expected Failed variant"),
