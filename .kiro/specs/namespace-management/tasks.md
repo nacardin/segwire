@@ -126,14 +126,14 @@
     - Implement command-specific argument parsing
     - _Requirements: 3.1, 3.2, 4.1, 4.2, 4.3_
 
-  - [ ] 8.3 Add output formatting and display
+  - [x] 8.3 Add output formatting and display
     - Implement table-based output for status and list commands
     - Add JSON and YAML output format options
     - Create progress display for long-running operations
     - _Requirements: 3.1, 3.2, 3.3, 3.6_
 
 - [ ] 9. Implement privilege checking and security
-  - [ ] 9.1 Add capability checking in daemon
+  - [x] 9.1 Add capability checking in daemon
     - Implement CAP_SYS_ADMIN capability verification
     - Add runtime privilege checking with clear error messages
     - Create container environment detection and adaptation
@@ -145,7 +145,7 @@
     - Create clear error messages for authorization failures
     - _Requirements: 7.3, 7.4, 7.6, 7.8_
 
-  - [ ] 9.3 Add configuration file security validation
+  - [x] 9.3 Add configuration file security validation
     - Implement file permission and ownership checking
     - Add input sanitization for configuration values
     - Create path traversal protection for configuration paths

@@ -74,7 +74,7 @@ The daemon will monitor configuration files, create and manage network namespace
 3. WHEN namespace operations are performed THEN the daemon SHALL log the operation type, target namespace, and result
 4. WHEN configuration files are processed THEN the daemon SHALL log parsing results and any validation warnings
 5. IF a failure occurs in one namespace THEN it SHALL NOT affect the operation or management of other namespaces
-6. WHEN log rotation is needed THEN the daemon SHALL support standard Linux logging practices
+6. WHEN log rotation is needed THEN the daemon SHALL delegate logging management entirely to systemd-journald
 
 ### Requirement 6
 

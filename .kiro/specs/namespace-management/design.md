@@ -13,7 +13,7 @@ The system follows a declarative configuration approach similar to systemd-netwo
 ### Key Design Principles
 
 - **Declarative Configuration**: Administrators describe desired state, daemon ensures actual state matches
-- **High Performance I/O**: Uses monoio runtime with io_uring for efficient file monitoring and network operations
+- **Performance & Correctness**: Uses `monoio` and `io_uring` for high-performance configuration and D-Bus monitoring, but explicitly relies on synchronous execution for `nix` namespace syscalls to guarantee strict thread context isolation.
 - **Robust Error Handling**: Failure isolation to a single namespace and comprehensive logging
 - **Standard Integration**: Uses D-Bus for IPC and PolicyKit for authorization
 - **File-Based Configuration**: TOML files for human-readable, version-controllable configuration
@@ -108,7 +108,6 @@ zvariant = "3.0"
 
 # Network namespace management
 netlink-packet-route = "0.17"
-rtnetlink = "0.13"
 nix = "0.27"
 
 # Configuration parsing
@@ -475,8 +474,7 @@ impl SegwireError {
 ```rust
 // Test utilities for mocking system operations
 pub mod test_utils {
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     
     pub struct MockNetlinkSocket {
         operations: Arc<Mutex<Vec<NetlinkOperation>>>,
@@ -489,8 +487,8 @@ pub mod test_utils {
             }
         }
         
-        pub async fn get_operations(&self) -> Vec<NetlinkOperation> {
-            self.operations.lock().await.clone()
+        pub fn get_operations(&self) -> Vec<NetlinkOperation> {
+            self.operations.lock().unwrap().clone()
         }
     }
 }

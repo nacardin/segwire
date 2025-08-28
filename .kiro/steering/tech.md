@@ -23,7 +23,6 @@
 
 ### Daemon-Specific
 - `netlink-packet-route` - Network namespace management
-- `rtnetlink` - Netlink socket communication
 - `nix` - Unix system calls
 - `toml` - Configuration file parsing
 - `tracing` - Structured logging
@@ -73,7 +72,7 @@ cargo fmt
 cargo clippy
 ```
 
-### Environment Varialbes
+### Environment Variables
 ```bash
 # Enable backtraces
 export RUST_BACKTRACE=full
@@ -81,7 +80,7 @@ export RUST_BACKTRACE=full
 
 ## Architecture Patterns
 - **Shared Library Pattern**: Common types and utilities in `segwire-common`
-- **Async/Await**: All I/O operations use async patterns with monoio runtime
+- **Async/Await**: File monitoring and API operations (like TOML reading) use async patterns with monoio runtime. System calls (like `nix` namespace operations) and Netlink socket communication are synchronous.
 - **Error Propagation**: Consistent error handling with `anyhow::Result` and custom error types
 - **Configuration-Driven**: Declarative TOML-based configuration approach
 
@@ -89,5 +88,14 @@ export RUST_BACKTRACE=full
 - **MUST USE**: `monoio` as the async runtime for all async operations
 - **DO NOT USE**: `tokio` - monoio provides better performance with io_uring
 - **Spawning Tasks**: Use `monoio::spawn()` instead of `tokio::spawn()`
-- **Async Functions**: All async functions should be compatible with monoio runtime
+- **Async Functions**: All async operations must be compatible with monoio runtime
 - **Dependencies**: Ensure all async dependencies are compatible with monoio or provide monoio-compatible alternatives
+
+### Sync vs Async Workloads
+To ensure performance and correctness, segwire cleanly separates control-plane tasks:
+- **Use Async (`monoio`) for**: File system operations (e.g., reading/writing TOML configurations natively supported by `io_uring`), D-Bus API communications, and general daemon coordination.
+- **Use Sync (`std`/`nix`) for**: Syscalls that manipulate the kernel namespace state (e.g., `setns()`, `unshare()`). These must run synchronously on the bound OS thread to avoid leaking namespace context across async workers. Direct netlink communications (`netlink-packet-route`) should also be performed synchronously within these bound contexts to avoid async protocol overhead for infrequent control-plane packets.
+
+### Mutexes and Locking
+- **`std::sync::Mutex`**: It is perfectly fine to use standard, non-async synchronous mutexes (`std::sync::Mutex`) as long as they are **only used within synchronous functions and never held across `await` points**. Holding a synchronous mutex across an `await` point will cause compilation errors in Rust or deadlocks/Clippy warnings.
+- **`async_lock::Mutex`**: If shared state needs to be locked and held while performing asynchronous `io_uring` file operations, DBus operations, or `monoio` tasks, you must use an asynchronous mutex like `async_lock::Mutex` (since `tokio::sync::Mutex` is forbidden).
