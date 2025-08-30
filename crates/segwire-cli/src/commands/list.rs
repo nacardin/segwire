@@ -1,4 +1,5 @@
 use crate::dbus_client::DbusClient;
+use crate::output::{self, OutputFormat};
 use anyhow::Result;
 use clap::Args;
 
@@ -11,26 +12,31 @@ pub struct ListArgs {
 
     /// Show only namespaces with specific status
     #[arg(long, value_enum)]
-    pub status: Option<NamespaceStatus>,
+    pub status: Option<NamespaceStatusFilter>,
 
-    /// Show additional summary information
+    /// Show additional details (full paths, etc.)
     #[arg(short, long)]
     pub verbose: bool,
 }
 
-#[derive(clap::ValueEnum, Clone)]
-pub enum OutputFormat {
-    Table,
-    Json,
-    Yaml,
-}
-
 #[derive(clap::ValueEnum, Clone, Debug)]
-pub enum NamespaceStatus {
+pub enum NamespaceStatusFilter {
     Active,
     Creating,
     Failed,
     Deleting,
+}
+
+impl NamespaceStatusFilter {
+    fn matches(&self, status: &str) -> bool {
+        let lower = status.to_lowercase();
+        match self {
+            NamespaceStatusFilter::Active => lower == "active",
+            NamespaceStatusFilter::Creating => lower == "creating",
+            NamespaceStatusFilter::Failed => lower.starts_with("failed"),
+            NamespaceStatusFilter::Deleting => lower == "deleting",
+        }
+    }
 }
 
 /// Execute the list command
@@ -45,36 +51,16 @@ pub async fn execute(client: DbusClient, args: ListArgs) -> Result<()> {
     list_namespaces(&client, &args).await
 }
 
-async fn list_namespaces(_client: &DbusClient, args: &ListArgs) -> Result<()> {
-    println!("Listing all managed namespaces");
+async fn list_namespaces(client: &DbusClient, args: &ListArgs) -> Result<()> {
+    // Fetch namespace list from daemon via D-Bus
+    let mut namespaces = client.list_namespaces().await?;
 
-    // TODO: Implement actual D-Bus call to list namespaces
-    // This will be implemented when the D-Bus methods are available
-
-    match args.format {
-        OutputFormat::Table => {
-            println!("Namespaces (table format):");
-            println!("NAME                 STATUS    INTERFACES    CREATED");
-            println!("----                 ------    ----------    -------");
-
-            if args.verbose {
-                println!("  - Verbose output requested");
-            }
-
-            if let Some(status_filter) = &args.status {
-                println!("  - Filtering by status: {:?}", status_filter);
-            }
-        }
-        OutputFormat::Json => {
-            println!("{{\"namespaces\": [], \"total\": 0}}");
-        }
-        OutputFormat::Yaml => {
-            println!("namespaces: []");
-            println!("total: 0");
-        }
+    // Apply status filter if specified
+    if let Some(ref filter) = args.status {
+        namespaces.retain(|(_name, status, _config, _desc)| filter.matches(status));
     }
 
-    Ok(())
+    output::format_namespace_list(&namespaces, &args.format, args.verbose)
 }
 
 #[cfg(test)]
@@ -83,15 +69,26 @@ mod tests {
 
     #[test]
     fn test_list_args_parsing() {
-        // Test that the args structure can be created
         let args = ListArgs {
             format: OutputFormat::Table,
-            status: Some(NamespaceStatus::Active),
+            status: Some(NamespaceStatusFilter::Active),
             verbose: true,
         };
 
         assert!(matches!(args.format, OutputFormat::Table));
-        assert!(matches!(args.status, Some(NamespaceStatus::Active)));
+        assert!(matches!(args.status, Some(NamespaceStatusFilter::Active)));
         assert!(args.verbose);
+    }
+
+    #[test]
+    fn test_status_filter_matches() {
+        assert!(NamespaceStatusFilter::Active.matches("active"));
+        assert!(NamespaceStatusFilter::Active.matches("Active"));
+        assert!(!NamespaceStatusFilter::Active.matches("creating"));
+
+        assert!(NamespaceStatusFilter::Creating.matches("creating"));
+        assert!(NamespaceStatusFilter::Failed.matches("failed"));
+        assert!(NamespaceStatusFilter::Failed.matches("failed: some error"));
+        assert!(NamespaceStatusFilter::Deleting.matches("deleting"));
     }
 }

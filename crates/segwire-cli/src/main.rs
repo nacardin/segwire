@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod commands;
 mod dbus_client;
+pub mod output;
 
 use commands::{Cli, Commands};
 use dbus_client::DbusClient;

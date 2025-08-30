@@ -14,6 +14,9 @@ zbus = { workspace = true }
 # Command-line interface
 clap = { workspace = true }
 
+# Serialization
+serde = { workspace = true }
+
 # Output formatting
 tabled = { workspace = true }
 serde_json = { workspace = true }

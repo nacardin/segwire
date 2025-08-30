@@ -1,4 +1,7 @@
 use crate::dbus_client::DbusClient;
+use crate::output::{
+    self, DaemonStatusInfo, InterfaceData, NamespaceStatusData, OutputFormat, RouteData,
+};
 use anyhow::Result;
 use clap::Args;
 
@@ -26,13 +29,6 @@ pub struct StatusArgs {
     pub logs: bool,
 }
 
-#[derive(clap::ValueEnum, Clone)]
-pub enum OutputFormat {
-    Table,
-    Json,
-    Yaml,
-}
-
 /// Execute the status command
 pub async fn execute(client: DbusClient, args: StatusArgs) -> Result<()> {
     // Check if daemon is available
@@ -55,7 +51,7 @@ pub async fn execute(client: DbusClient, args: StatusArgs) -> Result<()> {
 }
 
 async fn show_namespace_status(
-    _client: &DbusClient,
+    client: &DbusClient,
     namespace: &str,
     args: &StatusArgs,
 ) -> Result<()> {
@@ -68,66 +64,61 @@ async fn show_namespace_status(
         return Err(anyhow::anyhow!("Invalid namespace name: {}", namespace));
     }
 
-    println!("Getting status for namespace: {}", namespace);
+    // Fetch detailed namespace state from daemon via D-Bus
+    let state = client.get_namespace_status(namespace).await?;
 
-    // TODO: Implement actual D-Bus call to get namespace status
-    // This will be implemented when the D-Bus methods are available
-    match args.format {
-        OutputFormat::Table => {
-            println!(
-                "Status information for namespace '{}' (table format)",
-                namespace
-            );
-            if args.detailed {
-                println!("  - Detailed information requested");
-            }
-            if args.stats {
-                println!("  - Statistics requested");
-            }
-            if args.logs {
-                println!("  - Logs requested");
-            }
-        }
-        OutputFormat::Json => {
-            println!(
-                "{{\"namespace\": \"{}\", \"status\": \"placeholder\"}}",
-                namespace
-            );
-        }
-        OutputFormat::Yaml => {
-            println!("namespace: {}", namespace);
-            println!("status: placeholder");
-        }
-    }
+    let data = NamespaceStatusData {
+        name: state.name,
+        full_name: state.full_name,
+        status: state.status,
+        config_path: state.config_path,
+        interfaces: state
+            .interfaces
+            .into_iter()
+            .map(|i| InterfaceData {
+                name: i.name,
+                iface_type: i.interface_type,
+                status: i.status,
+                addresses: i.addresses,
+            })
+            .collect(),
+        routes: state
+            .routes
+            .into_iter()
+            .map(|r| RouteData {
+                destination: r.destination,
+                gateway: r.gateway,
+                metric: r.metric,
+                interface: r.interface,
+            })
+            .collect(),
+        dns_servers: state.dns_config.servers,
+        dns_search_domains: state.dns_config.search_domains,
+        created_at: state.created_at,
+        last_updated: state.last_updated,
+    };
 
-    Ok(())
+    output::format_namespace_status(&data, &args.format, args.detailed)
 }
 
-async fn show_all_namespaces_status(_client: &DbusClient, args: &StatusArgs) -> Result<()> {
-    println!("Getting status for all managed namespaces");
+async fn show_all_namespaces_status(client: &DbusClient, args: &StatusArgs) -> Result<()> {
+    // Fetch namespace list and daemon status in parallel
+    let namespaces = client.list_namespaces().await?;
 
-    // TODO: Implement actual D-Bus call to list all namespaces
-    // This will be implemented when the D-Bus methods are available
-    match args.format {
-        OutputFormat::Table => {
-            println!("All namespaces status (table format)");
-            if args.detailed {
-                println!("  - Detailed information requested");
-            }
-            if args.stats {
-                println!("  - Statistics requested");
-            }
+    let daemon_status = match client.get_daemon_status().await {
+        Ok((version, uptime, managed, active)) => Some(DaemonStatusInfo {
+            version,
+            uptime_secs: uptime,
+            managed_namespaces: managed,
+            active_namespaces: active,
+        }),
+        Err(e) => {
+            tracing::warn!("Could not fetch daemon status: {}", e);
+            None
         }
-        OutputFormat::Json => {
-            println!("{{\"namespaces\": [], \"status\": \"placeholder\"}}");
-        }
-        OutputFormat::Yaml => {
-            println!("namespaces: []");
-            println!("status: placeholder");
-        }
-    }
+    };
 
-    Ok(())
+    output::format_all_namespaces_status(&namespaces, daemon_status.as_ref(), &args.format)
 }
 
 /// Validate namespace name according to Linux namespace naming rules

@@ -1,0 +1,681 @@
+//! Output formatting and display utilities
+//!
+//! Provides table-based, JSON, and YAML output formatting for CLI commands,
+//! as well as progress display for long-running operations.
+
+use anyhow::Result;
+use serde::Serialize;
+use serde_json::json;
+use std::io::{self, Write};
+use tabled::settings::{object::Columns, Alignment, Modify, Style};
+use tabled::{Table, Tabled};
+
+/// Common output format enum used across commands
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum OutputFormat {
+    Table,
+    Json,
+    Yaml,
+}
+
+// ──────────────────────────────────────────────
+// Table row types
+// ──────────────────────────────────────────────
+
+/// A row in the namespace list table
+#[derive(Tabled, Serialize)]
+pub struct NamespaceListRow {
+    #[tabled(rename = "NAME")]
+    pub name: String,
+    #[tabled(rename = "STATUS")]
+    pub status: String,
+    #[tabled(rename = "INTERFACES")]
+    pub interfaces: String,
+    #[tabled(rename = "CONFIG")]
+    pub config_path: String,
+    #[tabled(rename = "DESCRIPTION")]
+    pub description: String,
+}
+
+/// A row in the namespace status detail table
+#[derive(Tabled, Serialize)]
+pub struct NamespaceDetailRow {
+    #[tabled(rename = "PROPERTY")]
+    pub property: String,
+    #[tabled(rename = "VALUE")]
+    pub value: String,
+}
+
+/// A row in the interface table
+#[derive(Tabled, Serialize)]
+pub struct InterfaceRow {
+    #[tabled(rename = "INTERFACE")]
+    pub name: String,
+    #[tabled(rename = "TYPE")]
+    pub iface_type: String,
+    #[tabled(rename = "STATUS")]
+    pub status: String,
+    #[tabled(rename = "ADDRESSES")]
+    pub addresses: String,
+}
+
+/// A row in the route table
+#[derive(Tabled, Serialize)]
+pub struct RouteRow {
+    #[tabled(rename = "DESTINATION")]
+    pub destination: String,
+    #[tabled(rename = "GATEWAY")]
+    pub gateway: String,
+    #[tabled(rename = "METRIC")]
+    pub metric: u32,
+    #[tabled(rename = "INTERFACE")]
+    pub interface: String,
+}
+
+/// Daemon status information
+#[derive(Serialize)]
+pub struct DaemonStatusInfo {
+    pub version: String,
+    pub uptime_secs: u64,
+    pub managed_namespaces: u32,
+    pub active_namespaces: u32,
+}
+
+// ──────────────────────────────────────────────
+// Table rendering
+// ──────────────────────────────────────────────
+
+/// Render a `tabled` table with a clean, modern style.
+pub fn render_table<T: Tabled>(rows: &[T]) -> String {
+    if rows.is_empty() {
+        return "(no results)".to_string();
+    }
+    Table::new(rows)
+        .with(Style::rounded())
+        .with(Modify::new(Columns::first()).with(Alignment::left()))
+        .to_string()
+}
+
+// ──────────────────────────────────────────────
+// Namespace list output helpers
+// ──────────────────────────────────────────────
+
+/// Format namespace list data from D-Bus tuples (name, status, config_path, description).
+pub fn format_namespace_list(
+    namespaces: &[(String, String, String, String)],
+    format: &OutputFormat,
+    verbose: bool,
+) -> Result<()> {
+    match format {
+        OutputFormat::Table => {
+            if namespaces.is_empty() {
+                println!("No managed namespaces found.");
+                return Ok(());
+            }
+            let rows: Vec<NamespaceListRow> = namespaces
+                .iter()
+                .map(|(name, status, config, desc)| NamespaceListRow {
+                    name: name.clone(),
+                    status: colorize_status(status),
+                    interfaces: "-".to_string(), // Summary count not available in list tuple
+                    config_path: if verbose {
+                        config.clone()
+                    } else {
+                        short_path(config)
+                    },
+                    description: desc.clone(),
+                })
+                .collect();
+            println!("{}", render_table(&rows));
+            println!();
+            println!("Total: {} namespace(s)", namespaces.len());
+        }
+        OutputFormat::Json => {
+            let items: Vec<_> = namespaces
+                .iter()
+                .map(|(name, status, config, desc)| {
+                    json!({
+                        "name": name,
+                        "status": status,
+                        "config_path": config,
+                        "description": desc
+                    })
+                })
+                .collect();
+            let output = json!({
+                "namespaces": items,
+                "total": namespaces.len()
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Yaml => {
+            println!("namespaces:");
+            for (name, status, config, desc) in namespaces {
+                println!("  - name: \"{}\"", name);
+                println!("    status: \"{}\"", status);
+                println!("    config_path: \"{}\"", config);
+                println!("    description: \"{}\"", desc);
+            }
+            println!("total: {}", namespaces.len());
+        }
+    }
+    Ok(())
+}
+
+// ──────────────────────────────────────────────
+// Namespace status output helpers
+// ──────────────────────────────────────────────
+
+/// Full namespace status information for rendering.
+#[derive(Serialize)]
+pub struct NamespaceStatusData {
+    pub name: String,
+    pub full_name: String,
+    pub status: String,
+    pub config_path: String,
+    pub interfaces: Vec<InterfaceData>,
+    pub routes: Vec<RouteData>,
+    pub dns_servers: Vec<String>,
+    pub dns_search_domains: Vec<String>,
+    pub created_at: u64,
+    pub last_updated: u64,
+}
+
+#[derive(Serialize)]
+pub struct InterfaceData {
+    pub name: String,
+    pub iface_type: String,
+    pub status: String,
+    pub addresses: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RouteData {
+    pub destination: String,
+    pub gateway: String,
+    pub metric: u32,
+    pub interface: String,
+}
+
+/// Format detailed namespace status output.
+pub fn format_namespace_status(
+    data: &NamespaceStatusData,
+    format: &OutputFormat,
+    detailed: bool,
+) -> Result<()> {
+    match format {
+        OutputFormat::Table => {
+            println!("Namespace: {}", data.name);
+            println!();
+
+            // Properties table
+            let mut props = vec![
+                NamespaceDetailRow {
+                    property: "Full Name".to_string(),
+                    value: data.full_name.clone(),
+                },
+                NamespaceDetailRow {
+                    property: "Status".to_string(),
+                    value: colorize_status(&data.status),
+                },
+                NamespaceDetailRow {
+                    property: "Config File".to_string(),
+                    value: data.config_path.clone(),
+                },
+                NamespaceDetailRow {
+                    property: "Created".to_string(),
+                    value: format_timestamp(data.created_at),
+                },
+                NamespaceDetailRow {
+                    property: "Last Updated".to_string(),
+                    value: format_timestamp(data.last_updated),
+                },
+            ];
+
+            if !data.dns_servers.is_empty() {
+                props.push(NamespaceDetailRow {
+                    property: "DNS Servers".to_string(),
+                    value: data.dns_servers.join(", "),
+                });
+            }
+            if !data.dns_search_domains.is_empty() {
+                props.push(NamespaceDetailRow {
+                    property: "DNS Search".to_string(),
+                    value: data.dns_search_domains.join(", "),
+                });
+            }
+
+            println!("{}", render_table(&props));
+
+            if detailed {
+                // Interfaces table
+                if !data.interfaces.is_empty() {
+                    println!();
+                    println!("Interfaces:");
+                    let iface_rows: Vec<InterfaceRow> = data
+                        .interfaces
+                        .iter()
+                        .map(|i| InterfaceRow {
+                            name: i.name.clone(),
+                            iface_type: i.iface_type.clone(),
+                            status: colorize_status(&i.status),
+                            addresses: i.addresses.join(", "),
+                        })
+                        .collect();
+                    println!("{}", render_table(&iface_rows));
+                }
+
+                // Routes table
+                if !data.routes.is_empty() {
+                    println!();
+                    println!("Routes:");
+                    let route_rows: Vec<RouteRow> = data
+                        .routes
+                        .iter()
+                        .map(|r| RouteRow {
+                            destination: r.destination.clone(),
+                            gateway: r.gateway.clone(),
+                            metric: r.metric,
+                            interface: r.interface.clone(),
+                        })
+                        .collect();
+                    println!("{}", render_table(&route_rows));
+                }
+            }
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(data)?);
+        }
+        OutputFormat::Yaml => {
+            println!("name: \"{}\"", data.name);
+            println!("full_name: \"{}\"", data.full_name);
+            println!("status: \"{}\"", data.status);
+            println!("config_path: \"{}\"", data.config_path);
+            println!("created_at: {}", data.created_at);
+            println!("last_updated: {}", data.last_updated);
+            println!("interfaces:");
+            for iface in &data.interfaces {
+                println!("  - name: \"{}\"", iface.name);
+                println!("    type: \"{}\"", iface.iface_type);
+                println!("    status: \"{}\"", iface.status);
+                println!("    addresses:");
+                for addr in &iface.addresses {
+                    println!("      - \"{}\"", addr);
+                }
+            }
+            println!("routes:");
+            for route in &data.routes {
+                println!("  - destination: \"{}\"", route.destination);
+                println!("    gateway: \"{}\"", route.gateway);
+                println!("    metric: {}", route.metric);
+                println!("    interface: \"{}\"", route.interface);
+            }
+            println!("dns:");
+            println!("  servers:");
+            for s in &data.dns_servers {
+                println!("    - \"{}\"", s);
+            }
+            println!("  search_domains:");
+            for d in &data.dns_search_domains {
+                println!("    - \"{}\"", d);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Format the all-namespace summary (used by `segwire status` with no args).
+pub fn format_all_namespaces_status(
+    namespaces: &[(String, String, String, String)],
+    daemon_status: Option<&DaemonStatusInfo>,
+    format: &OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Table => {
+            if let Some(ds) = daemon_status {
+                println!("Daemon Status");
+                let ds_rows = vec![
+                    NamespaceDetailRow {
+                        property: "Version".to_string(),
+                        value: ds.version.clone(),
+                    },
+                    NamespaceDetailRow {
+                        property: "Uptime".to_string(),
+                        value: format_duration(ds.uptime_secs),
+                    },
+                    NamespaceDetailRow {
+                        property: "Managed".to_string(),
+                        value: ds.managed_namespaces.to_string(),
+                    },
+                    NamespaceDetailRow {
+                        property: "Active".to_string(),
+                        value: ds.active_namespaces.to_string(),
+                    },
+                ];
+                println!("{}", render_table(&ds_rows));
+                println!();
+            }
+
+            format_namespace_list(namespaces, format, false)?;
+        }
+        OutputFormat::Json => {
+            let items: Vec<_> = namespaces
+                .iter()
+                .map(|(name, status, config, desc)| {
+                    json!({
+                        "name": name,
+                        "status": status,
+                        "config_path": config,
+                        "description": desc
+                    })
+                })
+                .collect();
+            let mut output = json!({
+                "namespaces": items,
+                "total": namespaces.len()
+            });
+            if let Some(ds) = daemon_status {
+                output["daemon"] = json!({
+                    "version": ds.version,
+                    "uptime_secs": ds.uptime_secs,
+                    "managed_namespaces": ds.managed_namespaces,
+                    "active_namespaces": ds.active_namespaces
+                });
+            }
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Yaml => {
+            if let Some(ds) = daemon_status {
+                println!("daemon:");
+                println!("  version: \"{}\"", ds.version);
+                println!("  uptime_secs: {}", ds.uptime_secs);
+                println!("  managed_namespaces: {}", ds.managed_namespaces);
+                println!("  active_namespaces: {}", ds.active_namespaces);
+            }
+            println!("namespaces:");
+            for (name, status, config, desc) in namespaces {
+                println!("  - name: \"{}\"", name);
+                println!("    status: \"{}\"", status);
+                println!("    config_path: \"{}\"", config);
+                println!("    description: \"{}\"", desc);
+            }
+            println!("total: {}", namespaces.len());
+        }
+    }
+    Ok(())
+}
+
+// ──────────────────────────────────────────────
+// Progress display
+// ──────────────────────────────────────────────
+
+/// Display a progress bar for long-running operations.
+pub struct ProgressDisplay {
+    operation: String,
+    total_width: usize,
+}
+
+impl ProgressDisplay {
+    pub fn new(operation: &str) -> Self {
+        Self {
+            operation: operation.to_string(),
+            total_width: 40,
+        }
+    }
+
+    /// Update the progress bar.
+    /// `progress` is a value between 0.0 and 1.0.
+    pub fn update(&self, progress: f64, message: &str) {
+        let filled = (progress * self.total_width as f64) as usize;
+        let empty = self.total_width.saturating_sub(filled);
+        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+        let pct = (progress * 100.0) as u32;
+
+        print!(
+            "\r{}: [{}] {:>3}% {}",
+            self.operation,
+            bar,
+            pct,
+            truncate_string(message, 40)
+        );
+        let _ = io::stdout().flush();
+    }
+
+    /// Mark the operation as complete.
+    pub fn finish(&self, message: &str) {
+        let bar: String = "█".repeat(self.total_width);
+        println!("\r{}: [{}] 100% {}", self.operation, bar, message);
+    }
+
+    /// Mark the operation as failed.
+    pub fn fail(&self, message: &str) {
+        println!();
+        eprintln!("✗ {}: {}", self.operation, message);
+    }
+}
+
+// ──────────────────────────────────────────────
+// Operation result formatting
+// ──────────────────────────────────────────────
+
+/// Format an operation result (success / failure) from D-Bus response.
+pub fn format_operation_result(
+    success: bool,
+    message: &str,
+    details: &std::collections::HashMap<String, String>,
+    format: &OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Table => {
+            if success {
+                println!("✓ {}", message);
+            } else {
+                eprintln!("✗ {}", message);
+            }
+            if !details.is_empty() {
+                println!();
+                let rows: Vec<NamespaceDetailRow> = details
+                    .iter()
+                    .map(|(k, v)| NamespaceDetailRow {
+                        property: k.clone(),
+                        value: v.clone(),
+                    })
+                    .collect();
+                println!("{}", render_table(&rows));
+            }
+        }
+        OutputFormat::Json => {
+            let output = json!({
+                "success": success,
+                "message": message,
+                "details": details
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        OutputFormat::Yaml => {
+            println!("success: {}", success);
+            println!("message: \"{}\"", message);
+            if !details.is_empty() {
+                println!("details:");
+                for (k, v) in details {
+                    println!("  {}: \"{}\"", k, v);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ──────────────────────────────────────────────
+// Utility helpers
+// ──────────────────────────────────────────────
+
+/// Add ANSI color to status strings for terminal display.
+fn colorize_status(status: &str) -> String {
+    match status.to_lowercase().as_str() {
+        "active" | "up" => format!("\x1b[32m{}\x1b[0m", status), // green
+        "creating" => format!("\x1b[33m{}\x1b[0m", status),      // yellow
+        "deleting" => format!("\x1b[33m{}\x1b[0m", status),      // yellow
+        s if s.starts_with("failed") => format!("\x1b[31m{}\x1b[0m", status), // red
+        "down" => format!("\x1b[31m{}\x1b[0m", status),          // red
+        _ => status.to_string(),
+    }
+}
+
+/// Shorten a file path for display (show only last 2 components).
+fn short_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() > 2 {
+        format!("…/{}", parts[parts.len() - 2..].join("/"))
+    } else {
+        path.to_string()
+    }
+}
+
+/// Format a Unix timestamp as a human-readable string.
+fn format_timestamp(unix_secs: u64) -> String {
+    if unix_secs == 0 {
+        return "-".to_string();
+    }
+    // Produce a simple UTC representation:  YYYY-MM-DD HH:MM:SS UTC
+    // Without pulling in `chrono`, we do a rough calculation.
+    let secs_per_minute = 60u64;
+    let secs_per_hour = 3600u64;
+    let secs_per_day = 86400u64;
+
+    let days_since_epoch = unix_secs / secs_per_day;
+    let time_of_day = unix_secs % secs_per_day;
+
+    let hours = time_of_day / secs_per_hour;
+    let minutes = (time_of_day % secs_per_hour) / secs_per_minute;
+    let seconds = time_of_day % secs_per_minute;
+
+    // Convert days since epoch to Y-M-D (simplified Gregorian).
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Format a duration in seconds as a human-friendly string.
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{}s", secs);
+    }
+    let minutes = secs / 60;
+    let remaining_secs = secs % 60;
+    if minutes < 60 {
+        return format!("{}m {}s", minutes, remaining_secs);
+    }
+    let hours = minutes / 60;
+    let remaining_mins = minutes % 60;
+    if hours < 24 {
+        return format!("{}h {}m", hours, remaining_mins);
+    }
+    let days = hours / 24;
+    let remaining_hours = hours % 24;
+    format!("{}d {}h", days, remaining_hours)
+}
+
+/// Truncate a string to a maximum length, appending "…" if truncated.
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len.saturating_sub(1)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(45), "45s");
+        assert_eq!(format_duration(65), "1m 5s");
+        assert_eq!(format_duration(3661), "1h 1m");
+        assert_eq!(format_duration(90061), "1d 1h");
+    }
+
+    #[test]
+    fn test_format_timestamp_zero() {
+        assert_eq!(format_timestamp(0), "-");
+    }
+
+    #[test]
+    fn test_format_timestamp_epoch() {
+        // 1970-01-01 00:00:01 UTC
+        let ts = format_timestamp(1);
+        assert!(ts.starts_with("1970-01-01 00:00:01"));
+    }
+
+    #[test]
+    fn test_short_path() {
+        assert_eq!(
+            short_path("/etc/segwire/namespaces/test.toml"),
+            "…/namespaces/test.toml"
+        );
+        assert_eq!(short_path("test.toml"), "test.toml");
+    }
+
+    #[test]
+    fn test_truncate_string() {
+        assert_eq!(truncate_string("hello", 10), "hello");
+        assert_eq!(truncate_string("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn test_colorize_status_active() {
+        let colored = colorize_status("active");
+        assert!(colored.contains("active"));
+        // Contains ANSI escape codes for green
+        assert!(colored.contains("\x1b[32m"));
+    }
+
+    #[test]
+    fn test_render_empty_table() {
+        let rows: Vec<NamespaceListRow> = vec![];
+        assert_eq!(render_table(&rows), "(no results)");
+    }
+
+    #[test]
+    fn test_render_table_with_data() {
+        let rows = vec![NamespaceListRow {
+            name: "test-ns".to_string(),
+            status: "active".to_string(),
+            interfaces: "2".to_string(),
+            config_path: "/etc/test.toml".to_string(),
+            description: "Test namespace".to_string(),
+        }];
+        let output = render_table(&rows);
+        assert!(output.contains("test-ns"));
+        assert!(output.contains("active"));
+    }
+
+    #[test]
+    fn test_progress_display() {
+        let pd = ProgressDisplay::new("Test");
+        assert_eq!(pd.total_width, 40);
+        assert_eq!(pd.operation, "Test");
+    }
+}

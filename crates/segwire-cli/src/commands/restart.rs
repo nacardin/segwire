@@ -1,4 +1,5 @@
 use crate::dbus_client::DbusClient;
+use crate::output::{self, OutputFormat, ProgressDisplay};
 use anyhow::Result;
 use clap::Args;
 
@@ -24,6 +25,10 @@ pub struct RestartArgs {
     /// Show detailed progress during restart
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Output format
+    #[arg(short = 'o', long, value_enum, default_value = "table")]
+    pub format: OutputFormat,
 }
 
 /// Execute the restart command
@@ -38,7 +43,7 @@ pub async fn execute(client: DbusClient, args: RestartArgs) -> Result<()> {
     restart_namespace(&client, &args).await
 }
 
-async fn restart_namespace(_client: &DbusClient, args: &RestartArgs) -> Result<()> {
+async fn restart_namespace(client: &DbusClient, args: &RestartArgs) -> Result<()> {
     // Validate namespace name
     if args.namespace.is_empty() {
         return Err(anyhow::anyhow!("Namespace name cannot be empty"));
@@ -51,19 +56,12 @@ async fn restart_namespace(_client: &DbusClient, args: &RestartArgs) -> Result<(
         ));
     }
 
-    // Check if this operation conflicts with automatic management
-    let is_auto_managed = check_if_auto_managed(&args.namespace).await?;
-
-    if is_auto_managed && !args.force {
+    // Confirm restart if not forced
+    if !args.force {
         eprintln!(
-            "Note: Namespace '{}' is managed by configuration files.",
+            "Note: Namespace '{}' will be recreated from its configuration file.",
             args.namespace
         );
-        eprintln!(
-            "This restart will recreate the namespace based on its current configuration file."
-        );
-        eprintln!("If you want to modify the namespace, edit its configuration file and use 'reload' instead.");
-        eprintln!();
 
         if !confirm_restart(&args.namespace)? {
             println!("Restart cancelled by user");
@@ -71,49 +69,34 @@ async fn restart_namespace(_client: &DbusClient, args: &RestartArgs) -> Result<(
         }
     }
 
-    // Confirm restart if not forced
-    if !args.force && !confirm_restart(&args.namespace)? {
-        println!("Restart cancelled by user");
-        return Ok(());
-    }
-
-    println!(
-        "Restarting namespace: {} (will recreate from configuration file)",
-        args.namespace
-    );
-
-    if args.verbose {
-        println!("Verbose progress reporting enabled");
-    }
-
-    // TODO: Implement actual D-Bus call to restart namespace
-    // This will involve deleting and recreating the namespace
-    // This will be implemented when the D-Bus methods are available
-
-    if args.wait {
-        println!(
-            "Waiting for namespace restart to complete (timeout: {}s)",
-            args.timeout
+    let progress = if args.verbose {
+        let p = ProgressDisplay::new("Restart");
+        p.update(
+            0.0,
+            &format!("Restarting namespace '{}'...", args.namespace),
         );
+        Some(p)
+    } else {
+        None
+    };
 
-        if args.verbose {
-            println!("Monitoring restart progress...");
-            // TODO: Listen for D-Bus progress signals
+    // Issue the D-Bus restart call
+    let result = client.restart_namespace(&args.namespace).await?;
+
+    if let Some(ref p) = progress {
+        if result.success {
+            p.finish(&format!("Namespace '{}' restarted", args.namespace));
+        } else {
+            p.fail(&result.message);
         }
-
-        // TODO: Implement waiting logic with progress updates
     }
 
-    println!("Namespace restart initiated successfully");
-
-    Ok(())
-}
-
-/// Check if a namespace is automatically managed by configuration files
-async fn check_if_auto_managed(_namespace: &str) -> Result<bool> {
-    // TODO: Implement actual check via D-Bus when methods are available
-    // For now, assume all namespaces might be auto-managed
-    Ok(true)
+    output::format_operation_result(
+        result.success,
+        &result.message,
+        &result.details,
+        &args.format,
+    )
 }
 
 /// Prompt user for confirmation of restart
@@ -135,8 +118,6 @@ fn confirm_restart(namespace: &str) -> Result<bool> {
 
 /// Validate namespace name according to Linux namespace naming rules
 fn is_valid_namespace_name(name: &str) -> bool {
-    // Basic validation - namespace names should be valid identifiers
-    // Must start with letter or underscore, contain only alphanumeric, underscore, hyphen
     if name.is_empty() || name.len() > 255 {
         return false;
     }
@@ -180,6 +161,7 @@ mod tests {
             wait: true,
             timeout: 90,
             verbose: true,
+            format: OutputFormat::Table,
         };
 
         assert_eq!(args.namespace, "test-namespace");

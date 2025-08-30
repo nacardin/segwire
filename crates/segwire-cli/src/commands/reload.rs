@@ -1,4 +1,5 @@
 use crate::dbus_client::DbusClient;
+use crate::output::{self, OutputFormat, ProgressDisplay};
 use anyhow::Result;
 use clap::Args;
 
@@ -20,6 +21,10 @@ pub struct ReloadArgs {
     /// Validate configurations before reloading
     #[arg(long)]
     pub validate: bool,
+
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "table")]
+    pub format: OutputFormat,
 }
 
 /// Execute the reload command
@@ -34,37 +39,39 @@ pub async fn execute(client: DbusClient, args: ReloadArgs) -> Result<()> {
     reload_configuration(&client, &args).await
 }
 
-async fn reload_configuration(_client: &DbusClient, args: &ReloadArgs) -> Result<()> {
-    println!("Reloading daemon configuration files");
-
+async fn reload_configuration(client: &DbusClient, args: &ReloadArgs) -> Result<()> {
     if args.validate {
-        println!("Validating configurations before reload...");
-        // TODO: Implement validation check via D-Bus when methods are available
-    }
-
-    if args.verbose {
-        println!("Verbose progress reporting enabled");
-    }
-
-    // TODO: Implement actual D-Bus call to reload configuration
-    // This will be implemented when the D-Bus methods are available
-
-    if args.wait {
-        println!(
-            "Waiting for configuration reload to complete (timeout: {}s)",
-            args.timeout
-        );
-        // TODO: Implement waiting logic with progress updates
-
         if args.verbose {
-            println!("Monitoring reload progress...");
-            // TODO: Listen for D-Bus progress signals
+            println!("Validating configurations before reload...");
+        }
+        // TODO: call client.validate_configuration() for each file
+    }
+
+    let progress = if args.verbose {
+        let p = ProgressDisplay::new("Reload");
+        p.update(0.0, "Initiating configuration reload...");
+        Some(p)
+    } else {
+        None
+    };
+
+    // Issue the D-Bus reload call
+    let result = client.reload_configuration().await?;
+
+    if let Some(ref p) = progress {
+        if result.success {
+            p.finish("Configuration reloaded");
+        } else {
+            p.fail(&result.message);
         }
     }
 
-    println!("Configuration reload initiated successfully");
-
-    Ok(())
+    output::format_operation_result(
+        result.success,
+        &result.message,
+        &result.details,
+        &args.format,
+    )
 }
 
 #[cfg(test)]
@@ -78,6 +85,7 @@ mod tests {
             timeout: 120,
             verbose: true,
             validate: false,
+            format: OutputFormat::Table,
         };
 
         assert!(args.wait);
