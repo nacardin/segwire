@@ -1,3 +1,4 @@
+mod capabilities;
 mod config;
 mod dbus_service;
 mod event_loop;
@@ -41,6 +42,19 @@ async fn main() -> SegwireResult<()> {
 
     info!("Segwire daemon starting...");
     info!("Configuration loaded from: {}", config_path.display());
+
+    // Verify that the daemon has the required privileges
+    match capabilities::verify_privileges() {
+        Ok(cap_result) => {
+            info!("Privilege check: {}", cap_result);
+        }
+        Err(e) => {
+            tracing::error!("{}", e);
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     info!(
         "Namespace prefix: {}",
         daemon_config.daemon.namespace_prefix
