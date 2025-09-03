@@ -57,8 +57,11 @@ impl PolicyKitAuthorizer {
         }
     }
 
-    /// Check if the calling user is authorized for the given action
-    pub async fn check_authorization(&self, action: &str) -> Result<(), SegwireError> {
+    pub async fn check_authorization(
+        &self,
+        action: &str,
+        sender: &zbus::names::UniqueName<'_>,
+    ) -> Result<(), SegwireError> {
         debug!("Checking PolicyKit authorization for action: {}", action);
 
         // Get the PolicyKit action ID for this operation
@@ -69,20 +72,47 @@ impl PolicyKitAuthorizer {
 
         debug!("Checking authorization for action '{}'", action_id);
 
-        // In a full implementation, this would:
-        // 1. Get the process ID and user ID of the sender from D-Bus context
-        // 2. Call PolicyKit's CheckAuthorization method
-        // 3. Handle the response and any interactive authentication
+        // Get the sender's process info (PID, UID)
+        let process_info = self
+            .get_sender_process_info(&zbus::names::BusName::Unique(sender.clone()))
+            .await?;
 
-        // For now, we'll implement a basic check that allows operations
-        // but logs the authorization attempt
-        match self.check_basic_authorization(action_id).await {
-            Ok(()) => {
+        // Call PolicyKit to check authorization
+        match self
+            .call_policykit_check_authorization(&process_info, action_id)
+            .await
+        {
+            Ok(AuthorizationResult::Authorized) => {
                 debug!("Authorization granted for action '{}'", action);
                 Ok(())
             }
+            Ok(AuthorizationResult::NotAuthorized) => {
+                warn!("Authorization denied for action '{}'", action_id);
+                Err(SegwireError::Permission(format!(
+                    "Not authorized to perform action: {}",
+                    action
+                )))
+            }
+            Ok(AuthorizationResult::AuthenticationRequired) => {
+                // Interactive authentication would be handled here
+                warn!("Interactive authentication required for action '{}', but not supported by daemon", action_id);
+                Err(SegwireError::Permission(format!(
+                    "Interactive authentication required for action: {}",
+                    action
+                )))
+            }
+            Ok(AuthorizationResult::Failed(reason)) => {
+                warn!(
+                    "PolicyKit authorization failed for action '{}': {}",
+                    action, reason
+                );
+                Err(SegwireError::Permission(reason))
+            }
             Err(e) => {
-                warn!("Authorization denied for action '{}': {}", action, e);
+                warn!(
+                    "PolicyKit authorization error for action '{}': {}",
+                    action, e
+                );
                 Err(e)
             }
         }

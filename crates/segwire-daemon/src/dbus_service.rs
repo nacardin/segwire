@@ -75,27 +75,34 @@ impl DbusService {
                     .with_context(error_ctx)
                     .log_and_return()
             })?
-            .serve_at(
-                interface::OBJECT_PATH,
-                NamespaceManagerInterface {
-                    namespace_manager: namespace_manager.clone(),
-                    daemon_start_time: SystemTime::now(),
-                },
-            )
-            .map_err(|e| {
-                let error_ctx = ErrorContext::new("dbus_object_registration")
-                    .with_field("object_path", interface::OBJECT_PATH)
-                    .with_remediation("Check D-Bus object path permissions");
-                SegwireError::DBus(e)
-                    .with_context(error_ctx)
-                    .log_and_return()
-            })?
             .build()
             .await
             .map_err(|e| {
                 let error_ctx = ErrorContext::new("dbus_connection_build")
                     .with_remediation("Ensure D-Bus system bus is running")
                     .with_remediation("Check system D-Bus configuration");
+                SegwireError::DBus(e)
+                    .with_context(error_ctx)
+                    .log_and_return()
+            })?;
+
+        let authorizer = crate::policykit::PolicyKitAuthorizer::new(connection.clone());
+
+        connection
+            .object_server()
+            .at(
+                interface::OBJECT_PATH,
+                NamespaceManagerInterface {
+                    namespace_manager: namespace_manager.clone(),
+                    daemon_start_time: SystemTime::now(),
+                    authorizer,
+                },
+            )
+            .await
+            .map_err(|e| {
+                let error_ctx = ErrorContext::new("dbus_object_registration")
+                    .with_field("object_path", interface::OBJECT_PATH)
+                    .with_remediation("Check D-Bus object path permissions");
                 SegwireError::DBus(e)
                     .with_context(error_ctx)
                     .log_and_return()
@@ -262,16 +269,20 @@ impl DbusService {
 struct NamespaceManagerInterface {
     namespace_manager: Arc<Mutex<NamespaceManager>>,
     daemon_start_time: SystemTime,
+    authorizer: crate::policykit::PolicyKitAuthorizer,
 }
 
 #[zbus::dbus_interface(name = "org.segwire.NamespaceManager")]
 impl NamespaceManagerInterface {
     /// List all managed namespaces with basic information
-    async fn list_namespaces(&self) -> zbus::fdo::Result<method_signatures::ListNamespacesResult> {
+    async fn list_namespaces(
+        &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
+    ) -> zbus::fdo::Result<method_signatures::ListNamespacesResult> {
         debug!("D-Bus method call: ListNamespaces");
 
         // Check authorization
-        if let Err(e) = self.check_authorization("list").await {
+        if let Err(e) = self.check_authorization("list", &header).await {
             warn!("Authorization failed for ListNamespaces: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -297,6 +308,7 @@ impl NamespaceManagerInterface {
     /// Get detailed status information for a specific namespace
     async fn get_namespace_status(
         &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
         name: String,
     ) -> zbus::fdo::Result<method_signatures::GetNamespaceStatusResult> {
         debug!("D-Bus method call: GetNamespaceStatus({})", name);
@@ -308,7 +320,7 @@ impl NamespaceManagerInterface {
         }
 
         // Check authorization
-        if let Err(e) = self.check_authorization("status").await {
+        if let Err(e) = self.check_authorization("status", &header).await {
             warn!("Authorization failed for GetNamespaceStatus: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -334,6 +346,7 @@ impl NamespaceManagerInterface {
     /// Create a namespace from a configuration file
     async fn create_namespace(
         &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
         config_path: String,
     ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
         debug!("D-Bus method call: CreateNamespace({})", config_path);
@@ -345,7 +358,7 @@ impl NamespaceManagerInterface {
         }
 
         // Check authorization
-        if let Err(e) = self.check_authorization("create").await {
+        if let Err(e) = self.check_authorization("create", &header).await {
             warn!("Authorization failed for CreateNamespace: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -389,6 +402,7 @@ impl NamespaceManagerInterface {
     /// Delete a managed namespace
     async fn delete_namespace(
         &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
         name: String,
     ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
         debug!("D-Bus method call: DeleteNamespace({})", name);
@@ -400,7 +414,7 @@ impl NamespaceManagerInterface {
         }
 
         // Check authorization
-        if let Err(e) = self.check_authorization("delete").await {
+        if let Err(e) = self.check_authorization("delete", &header).await {
             warn!("Authorization failed for DeleteNamespace: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -427,11 +441,12 @@ impl NamespaceManagerInterface {
     /// Reload all configuration files and update namespaces
     async fn reload_configuration(
         &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
     ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
         debug!("D-Bus method call: ReloadConfiguration");
 
         // Check authorization
-        if let Err(e) = self.check_authorization("reload").await {
+        if let Err(e) = self.check_authorization("reload", &header).await {
             warn!("Authorization failed for ReloadConfiguration: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -470,6 +485,7 @@ impl NamespaceManagerInterface {
     /// Validate a configuration file without applying it
     async fn validate_configuration(
         &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
         config_path: String,
     ) -> zbus::fdo::Result<method_signatures::ConfigValidationResult> {
         debug!("D-Bus method call: ValidateConfiguration({})", config_path);
@@ -481,7 +497,7 @@ impl NamespaceManagerInterface {
         }
 
         // Check authorization
-        if let Err(e) = self.check_authorization("validate").await {
+        if let Err(e) = self.check_authorization("validate", &header).await {
             warn!("Authorization failed for ValidateConfiguration: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -510,11 +526,14 @@ impl NamespaceManagerInterface {
     }
 
     /// Get daemon status and statistics
-    async fn get_daemon_status(&self) -> zbus::fdo::Result<method_signatures::DaemonStatusResult> {
+    async fn get_daemon_status(
+        &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
+    ) -> zbus::fdo::Result<method_signatures::DaemonStatusResult> {
         debug!("D-Bus method call: GetDaemonStatus");
 
         // Check authorization
-        if let Err(e) = self.check_authorization("status").await {
+        if let Err(e) = self.check_authorization("status", &header).await {
             warn!("Authorization failed for GetDaemonStatus: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -546,6 +565,7 @@ impl NamespaceManagerInterface {
     /// Restart a specific namespace (delete and recreate)
     async fn restart_namespace(
         &self,
+        #[zbus(header)] header: zbus::MessageHeader<'_>,
         name: String,
     ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
         debug!("D-Bus method call: RestartNamespace({})", name);
@@ -557,7 +577,7 @@ impl NamespaceManagerInterface {
         }
 
         // Check authorization
-        if let Err(e) = self.check_authorization("restart").await {
+        if let Err(e) = self.check_authorization("restart", &header).await {
             warn!("Authorization failed for RestartNamespace: {:?}", e);
             return Err(create_fdo_error(e));
         }
@@ -618,24 +638,16 @@ impl NamespaceManagerInterface {
 }
 
 impl NamespaceManagerInterface {
-    /// Check authorization for D-Bus method calls using PolicyKit
-    async fn check_authorization(&self, action: &str) -> Result<(), SegwireError> {
-        // TODO: Implement actual PolicyKit integration
-        // For now, we'll do basic permission checking
+    async fn check_authorization(
+        &self,
+        action: &str,
+        header: &zbus::MessageHeader<'_>,
+    ) -> Result<(), SegwireError> {
+        let sender_result = header.sender().map_err(SegwireError::DBus)?;
+        let sender = sender_result
+            .ok_or_else(|| SegwireError::Permission("Unknown D-Bus sender".to_string()))?;
 
-        debug!("Checking authorization for action: {}", action);
-
-        // In a real implementation, this would:
-        // 1. Get the calling process UID/PID from D-Bus message context
-        // 2. Call PolicyKit to check permissions for the specific action
-        // 3. Return appropriate error if not authorized
-
-        // For now, we'll allow all operations but log the check
-        debug!(
-            "Authorization check passed for action: {} (placeholder implementation)",
-            action
-        );
-        Ok(())
+        self.authorizer.check_authorization(action, sender).await
     }
 
     /// Load and parse a namespace configuration file

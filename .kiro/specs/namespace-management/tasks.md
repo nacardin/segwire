@@ -139,7 +139,7 @@
     - Create container environment detection and adaptation
     - _Requirements: 7.1, 7.5, 7.6, 7.7_
 
-  - [ ] 9.2 Create PolicyKit integration
+  - [x] 9.2 Create PolicyKit integration
     - Implement PolicyKit authorization for D-Bus methods
     - Add fine-grained permission checking for different operations
     - Create clear error messages for authorization failures
