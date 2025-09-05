@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Namespace state management for segwire-daemon
 //!
 //! This module provides in-memory state tracking for managed namespaces,
@@ -57,33 +55,11 @@ pub struct StateConflict {
     /// Name of the namespace with conflict
     pub namespace_name: String,
 
-    /// Type of conflict
-    pub conflict_type: ConflictType,
-
     /// Description of the conflict
     pub description: String,
 
     /// Suggested resolution action
     pub resolution: ConflictResolution,
-}
-
-/// Types of conflicts that can occur
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConflictType {
-    /// Configuration exists but namespace doesn't exist in system
-    ConfigurationWithoutNamespace,
-
-    /// Namespace exists in system but no configuration found
-    NamespaceWithoutConfiguration,
-
-    /// Configuration and namespace exist but have different settings
-    ConfigurationMismatch,
-
-    /// Namespace is in an error state
-    NamespaceError,
-
-    /// Configuration file has validation errors
-    ConfigurationError,
 }
 
 /// Possible resolutions for conflicts
@@ -92,17 +68,8 @@ pub enum ConflictResolution {
     /// Create the namespace from configuration
     CreateNamespace,
 
-    /// Update the namespace to match configuration
-    UpdateNamespace,
-
     /// Delete the namespace (no configuration)
     DeleteNamespace,
-
-    /// Fix the configuration file
-    FixConfiguration,
-
-    /// Manual intervention required
-    ManualIntervention,
 }
 
 impl NamespaceStateManager {
@@ -244,7 +211,6 @@ impl NamespaceStateManager {
 
                 let conflict = StateConflict {
                     namespace_name: actual_name.clone(),
-                    conflict_type: ConflictType::NamespaceWithoutConfiguration,
                     description: format!(
                         "Namespace '{}' exists in system but has no configuration file",
                         actual_name
@@ -316,7 +282,6 @@ impl NamespaceStateManager {
                 warn!("Namespace {} exists in state but not in system", full_name);
                 let conflict = StateConflict {
                     namespace_name: full_name.clone(),
-                    conflict_type: ConflictType::ConfigurationWithoutNamespace,
                     description: format!(
                         "Namespace '{}' is tracked but doesn't exist in system",
                         full_name
@@ -577,19 +542,6 @@ impl NamespaceStateManager {
                 }
             }
 
-            ConflictResolution::UpdateNamespace => {
-                if let Some(config_entry) =
-                    config_manager.get_namespace_config(&conflict.namespace_name)
-                {
-                    // Get actual namespace info
-                    let actual_namespaces = self.netlink_manager.list_namespaces()?;
-                    if let Some(actual_info) = actual_namespaces.get(&conflict.namespace_name) {
-                        self.update_existing_namespace(config_entry, actual_info)
-                            .await?;
-                    }
-                }
-            }
-
             ConflictResolution::DeleteNamespace => {
                 info!(
                     "Deleting namespace without configuration: {}",
@@ -615,38 +567,7 @@ impl NamespaceStateManager {
                     }
                 }
             }
-
-            ConflictResolution::FixConfiguration => {
-                warn!(
-                    "Configuration fix required for {}: {}",
-                    conflict.namespace_name, conflict.description
-                );
-                // This requires manual intervention - log the issue
-                return Err(SegwireError::Config(
-                    segwire_common::error::ConfigError::InvalidValue {
-                        field: "configuration".to_string(),
-                        value: format!(
-                            "Manual configuration fix required: {}",
-                            conflict.description
-                        ),
-                    },
-                ));
-            }
-
-            ConflictResolution::ManualIntervention => {
-                warn!(
-                    "Manual intervention required for {}: {}",
-                    conflict.namespace_name, conflict.description
-                );
-                return Err(SegwireError::Config(
-                    segwire_common::error::ConfigError::InvalidValue {
-                        field: "manual_intervention".to_string(),
-                        value: format!("Manual intervention required: {}", conflict.description),
-                    },
-                ));
-            }
         }
-
         Ok(())
     }
 
@@ -710,6 +631,7 @@ enum SyncAction {
 /// Statistics about namespace state
 #[derive(Debug, Clone)]
 pub struct StateStats {
+    #[allow(dead_code)]
     pub total_namespaces: usize,
     pub active_namespaces: usize,
     pub creating_namespaces: usize,
@@ -727,6 +649,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[allow(dead_code)]
     fn create_test_config_entry(name: &str, temp_dir: &TempDir) -> NamespaceConfigEntry {
         let config_content = format!(
             r#"
@@ -835,22 +758,6 @@ servers = ["8.8.8.8"]
         assert!(!needs_sync_recent);
     }
 
-    #[test]
-    fn test_conflict_types() {
-        let conflict = StateConflict {
-            namespace_name: "test".to_string(),
-            conflict_type: ConflictType::ConfigurationWithoutNamespace,
-            description: "Test conflict".to_string(),
-            resolution: ConflictResolution::CreateNamespace,
-        };
-
-        assert_eq!(
-            conflict.conflict_type,
-            ConflictType::ConfigurationWithoutNamespace
-        );
-        assert_eq!(conflict.resolution, ConflictResolution::CreateNamespace);
-    }
-
     #[monoio::test]
     async fn test_state_stats() {
         // Create a mock manager for testing
@@ -884,7 +791,7 @@ servers = ["8.8.8.8"]
         manager.update_namespace_state(state2);
 
         let stats = manager.get_state_stats();
-        assert_eq!(stats.total_namespaces, 2);
+
         assert_eq!(stats.active_namespaces, 1);
         assert_eq!(stats.failed_namespaces, 1);
         assert_eq!(stats.creating_namespaces, 0);

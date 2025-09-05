@@ -1,11 +1,10 @@
-#![allow(dead_code, unused_variables, unused_assignments)]
 //! D-Bus service implementation for the segwire daemon
 //!
 //! Provides the D-Bus interface for CLI communication, including service registration,
 //! method call handling, and PolicyKit integration for authorization.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use async_lock::Mutex as AsyncMutex;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use segwire_common::dbus::{
@@ -17,26 +16,21 @@ use segwire_common::{log_info, LogContext};
 use tracing::{debug, info, warn};
 use zbus::{Connection, ConnectionBuilder, SignalContext};
 
-/// D-Bus service for the segwire daemon
 pub struct DbusService {
     connection: Connection,
-    namespace_manager: Arc<Mutex<NamespaceManager>>,
-    daemon_start_time: SystemTime,
-}
-
-/// Namespace manager state for D-Bus operations
-pub struct NamespaceManager {
-    namespaces: HashMap<String, NamespaceState>,
-    config_dir: std::path::PathBuf,
-    namespace_prefix: String,
 }
 
 impl DbusService {
     /// Create a new D-Bus service instance
     pub async fn new(
-        config_dir: std::path::PathBuf,
-        namespace_prefix: String,
+        config_manager: Arc<AsyncMutex<crate::config::ConfigManager>>,
+        state_manager: Arc<AsyncMutex<crate::namespace_state::NamespaceStateManager>>,
     ) -> Result<Self, SegwireError> {
+        let (config_dir, namespace_prefix) = {
+            let manager = config_manager.lock().await;
+            (manager.get_config_dir(), manager.get_namespace_prefix())
+        };
+
         let ctx = LogContext::new("dbus_service_initialization")
             .with_field("service_name", interface::SERVICE_NAME)
             .with_field("object_path", interface::OBJECT_PATH)
@@ -44,13 +38,6 @@ impl DbusService {
             .with_field("config_dir", config_dir.display().to_string());
 
         log_info!(ctx, "Initializing D-Bus service");
-
-        // Create namespace manager
-        let namespace_manager = Arc::new(Mutex::new(NamespaceManager {
-            namespaces: HashMap::new(),
-            config_dir,
-            namespace_prefix,
-        }));
 
         // Build D-Bus connection with service registration
         let connection = ConnectionBuilder::system()
@@ -88,12 +75,16 @@ impl DbusService {
 
         let authorizer = crate::policykit::PolicyKitAuthorizer::new(connection.clone());
 
+        let connection_clone = connection.clone();
+
         connection
             .object_server()
             .at(
                 interface::OBJECT_PATH,
                 NamespaceManagerInterface {
-                    namespace_manager: namespace_manager.clone(),
+                    connection: connection_clone,
+                    config_manager: config_manager.clone(),
+                    state_manager: state_manager.clone(),
                     daemon_start_time: SystemTime::now(),
                     authorizer,
                 },
@@ -110,34 +101,7 @@ impl DbusService {
 
         log_info!(ctx, "D-Bus service registered successfully");
 
-        Ok(Self {
-            connection,
-            namespace_manager,
-            daemon_start_time: SystemTime::now(),
-        })
-    }
-
-    /// Get the D-Bus connection for signal emission
-    pub fn connection(&self) -> &Connection {
-        &self.connection
-    }
-
-    /// Get the namespace manager for internal operations
-    pub fn namespace_manager(&self) -> Arc<Mutex<NamespaceManager>> {
-        self.namespace_manager.clone()
-    }
-
-    /// Run the D-Bus service event loop
-    pub async fn run(&self) -> Result<(), SegwireError> {
-        info!("D-Bus service is ready to handle requests");
-
-        // The connection will handle incoming method calls automatically
-        // through zbus's internal event loop. We don't need to block here
-        // since the connection is already registered and active.
-
-        // Just return success - the actual D-Bus handling happens
-        // through the zbus connection's internal mechanisms
-        Ok(())
+        Ok(Self { connection })
     }
 
     /// Emit a namespace created signal
@@ -173,26 +137,6 @@ impl DbusService {
         .await?;
 
         debug!("Emitted NamespaceDeleted signal for {}", name);
-        Ok(())
-    }
-
-    /// Emit a configuration reloaded signal
-    pub async fn emit_configuration_reloaded(
-        &self,
-        count: u32,
-        errors: u32,
-    ) -> Result<(), SegwireError> {
-        NamespaceManagerInterface::configuration_reloaded(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            count,
-            errors,
-        )
-        .await?;
-
-        debug!(
-            "Emitted ConfigurationReloaded signal: {} configs, {} errors",
-            count, errors
-        );
         Ok(())
     }
 
@@ -241,35 +185,25 @@ impl DbusService {
         );
         Ok(())
     }
-
-    /// Emit an error occurred signal
-    pub async fn emit_error_occurred(
-        &self,
-        error_type: &str,
-        message: &str,
-        namespace: &str,
-    ) -> Result<(), SegwireError> {
-        NamespaceManagerInterface::error_occurred(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            error_type,
-            message,
-            namespace,
-        )
-        .await?;
-
-        debug!(
-            "Emitted ErrorOccurred signal: {} - {} (namespace: {})",
-            error_type, message, namespace
-        );
-        Ok(())
-    }
 }
 
 /// D-Bus interface implementation
 struct NamespaceManagerInterface {
-    namespace_manager: Arc<Mutex<NamespaceManager>>,
+    connection: Connection,
+    config_manager: Arc<AsyncMutex<crate::config::ConfigManager>>,
+    state_manager: Arc<AsyncMutex<crate::namespace_state::NamespaceStateManager>>,
     daemon_start_time: SystemTime,
     authorizer: crate::policykit::PolicyKitAuthorizer,
+}
+
+impl NamespaceManagerInterface {
+    async fn emit_error(&self, error_type: &str, message: &str, namespace: &str) {
+        if let Ok(ctx) = SignalContext::new(&self.connection, interface::OBJECT_PATH) {
+            if let Err(e) = Self::error_occurred(&ctx, error_type, message, namespace).await {
+                warn!("Failed to emit ErrorOccurred signal: {:?}", e);
+            }
+        }
+    }
 }
 
 #[zbus::dbus_interface(name = "org.segwire.NamespaceManager")]
@@ -287,16 +221,21 @@ impl NamespaceManagerInterface {
             return Err(create_fdo_error(e));
         }
 
-        let manager = self.namespace_manager.lock().unwrap();
+        let prefix = {
+            let config_mgr = self.config_manager.lock().await;
+            config_mgr.get_namespace_prefix()
+        };
+
+        let manager = self.state_manager.lock().await;
         let namespaces: Vec<_> = manager
-            .namespaces
+            .get_all_states()
             .values()
             .map(|ns| {
                 (
                     ns.name.clone(),
                     ns.status.clone(),
                     ns.config_path.clone(),
-                    format!("Namespace managed by {}", manager.namespace_prefix),
+                    format!("Namespace managed by {}", prefix),
                 )
             })
             .collect();
@@ -325,8 +264,16 @@ impl NamespaceManagerInterface {
             return Err(create_fdo_error(e));
         }
 
-        let manager = self.namespace_manager.lock().unwrap();
-        match manager.namespaces.get(&name) {
+        let full_name = {
+            let config_mgr = self.config_manager.lock().await;
+            config_mgr.generate_full_namespace_name(&name)
+        };
+
+        let manager = self.state_manager.lock().await;
+        match manager
+            .get_namespace_state(&full_name)
+            .or_else(|| manager.get_namespace_state(&name))
+        {
             Some(namespace) => {
                 debug!(
                     "Found namespace '{}' with status '{}'",
@@ -372,6 +319,8 @@ impl NamespaceManagerInterface {
                     "Failed to load namespace config from '{}': {:?}",
                     config_path, e
                 );
+                self.emit_error("ConfigurationError", &e.to_string(), "")
+                    .await;
                 return Ok(OperationResult::failure(format!(
                     "Failed to load configuration: {}",
                     e
@@ -391,6 +340,8 @@ impl NamespaceManagerInterface {
             }
             Err(e) => {
                 warn!("Failed to create namespace from '{}': {:?}", config_path, e);
+                self.emit_error("CreationError", &e.to_string(), &config_path)
+                    .await;
                 Ok(OperationResult::failure(format!(
                     "Failed to create namespace: {}",
                     e
@@ -430,6 +381,8 @@ impl NamespaceManagerInterface {
             }
             Err(e) => {
                 warn!("Failed to delete namespace '{}': {:?}", name, e);
+                self.emit_error("DeletionError", &e.to_string(), &name)
+                    .await;
                 Ok(OperationResult::failure(format!(
                     "Failed to delete namespace: {}",
                     e
@@ -459,6 +412,16 @@ impl NamespaceManagerInterface {
                     loaded_count, error_count
                 );
 
+                if let Err(e) = NamespaceManagerInterface::configuration_reloaded(
+                    &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
+                    loaded_count,
+                    error_count,
+                )
+                .await
+                {
+                    warn!("Failed to emit configuration_reloaded signal: {:?}", e);
+                }
+
                 let message = if error_count == 0 {
                     format!("Successfully reloaded {} configurations", loaded_count)
                 } else {
@@ -473,7 +436,8 @@ impl NamespaceManagerInterface {
                     .with_detail("error_count".to_string(), error_count.to_string()))
             }
             Err(e) => {
-                warn!("Configuration reload failed: {:?}", e);
+                warn!("Configuration reload completed with errors: {:?}", e);
+                self.emit_error("ReloadError", &e.to_string(), "").await;
                 Ok(OperationResult::failure(format!(
                     "Configuration reload failed: {}",
                     e
@@ -538,19 +502,24 @@ impl NamespaceManagerInterface {
             return Err(create_fdo_error(e));
         }
 
-        let manager = self.namespace_manager.lock().unwrap();
         let uptime = self
             .daemon_start_time
             .elapsed()
             .unwrap_or_default()
             .as_secs();
 
-        let managed_count = manager.namespaces.len() as u32;
-        let active_count = manager
-            .namespaces
-            .values()
-            .filter(|ns| ns.is_active())
-            .count() as u32;
+        // Get stats from state_manager and config_manager
+        let state_stats = {
+            let mgr = self.state_manager.lock().await;
+            mgr.get_state_stats()
+        };
+        let config_stats = {
+            let mgr = self.config_manager.lock().await;
+            mgr.get_config_stats()
+        };
+
+        let managed_count = config_stats.total_configs as u32;
+        let active_count = state_stats.active_namespaces as u32;
 
         let version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -683,8 +652,8 @@ impl NamespaceManagerInterface {
         use segwire_common::netlink::NetlinkManager;
 
         let full_name = {
-            let manager = self.namespace_manager.lock().unwrap();
-            format!("{}-{}", manager.namespace_prefix, config.namespace.name)
+            let config_mgr = self.config_manager.lock().await;
+            config_mgr.generate_full_namespace_name(&config.namespace.name)
         };
 
         debug!("Creating namespace '{}' from configuration", full_name);
@@ -702,8 +671,8 @@ impl NamespaceManagerInterface {
 
         // Add to managed namespaces
         {
-            let mut manager = self.namespace_manager.lock().unwrap();
-            manager.add_namespace(namespace_state);
+            let mut manager = self.state_manager.lock().await;
+            manager.update_namespace_state(namespace_state);
         }
 
         info!("Successfully created namespace '{}'", full_name);
@@ -715,25 +684,22 @@ impl NamespaceManagerInterface {
         use segwire_common::netlink::NetlinkManager;
 
         let full_name = {
-            let manager = self.namespace_manager.lock().unwrap();
-            let full_name = if name.starts_with(&manager.namespace_prefix) {
-                name.to_string()
-            } else {
-                format!("{}-{}", manager.namespace_prefix, name)
-            };
+            let config_mgr = self.config_manager.lock().await;
+            config_mgr.generate_full_namespace_name(name)
+        };
 
-            // Check if namespace exists in our managed set
-            if !manager.namespaces.contains_key(name)
-                && !manager.namespaces.contains_key(&full_name)
+        // Check if namespace exists in our managed set
+        {
+            let manager = self.state_manager.lock().await;
+            if manager.get_namespace_state(name).is_none()
+                && manager.get_namespace_state(&full_name).is_none()
             {
                 return Err(SegwireError::Network(format!(
                     "Namespace '{}' not found",
                     name
                 )));
             }
-
-            full_name
-        };
+        }
 
         debug!("Deleting namespace '{}'", full_name);
 
@@ -743,9 +709,9 @@ impl NamespaceManagerInterface {
 
         // Remove from managed namespaces
         {
-            let mut manager = self.namespace_manager.lock().unwrap();
-            manager.remove_namespace(name);
-            manager.remove_namespace(&full_name);
+            let mut manager = self.state_manager.lock().await;
+            manager.remove_namespace_state(name);
+            manager.remove_namespace_state(&full_name);
         }
 
         info!("Successfully deleted namespace '{}'", full_name);
@@ -758,8 +724,8 @@ impl NamespaceManagerInterface {
 
         // Get the configuration directory
         let config_dir = {
-            let manager = self.namespace_manager.lock().unwrap();
-            manager.config_dir.clone()
+            let manager = self.config_manager.lock().await;
+            manager.get_config_dir()
         };
 
         // Scan for configuration files
@@ -999,111 +965,22 @@ impl NamespaceManagerInterface {
             progress * 100.0,
             message
         );
-
         // TODO: Emit actual D-Bus signal when signal emission is properly implemented
-        // NamespaceManagerInterface::operation_progress(
-        //     &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-        //     operation,
-        //     progress,
-        //     message,
-        // ).await?;
+        /*
+        NamespaceManagerInterface::operation_progress(
+            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
+            operation,
+            progress,
+            message,
+        ).await?;
+        */
 
         Ok(())
     }
 }
 
-impl NamespaceManager {
-    /// Add a namespace to the managed set
-    pub fn add_namespace(&mut self, namespace: NamespaceState) {
-        debug!("Adding namespace '{}' to managed set", namespace.name);
-        self.namespaces.insert(namespace.name.clone(), namespace);
-    }
-
-    /// Remove a namespace from the managed set
-    pub fn remove_namespace(&mut self, name: &str) -> Option<NamespaceState> {
-        debug!("Removing namespace '{}' from managed set", name);
-        self.namespaces.remove(name)
-    }
-
-    /// Get a namespace by name
-    pub fn get_namespace(&self, name: &str) -> Option<&NamespaceState> {
-        self.namespaces.get(name)
-    }
-
-    /// Get a mutable reference to a namespace by name
-    pub fn get_namespace_mut(&mut self, name: &str) -> Option<&mut NamespaceState> {
-        self.namespaces.get_mut(name)
-    }
-
-    /// List all managed namespaces
-    pub fn list_namespaces(&self) -> Vec<&NamespaceState> {
-        self.namespaces.values().collect()
-    }
-
-    /// Get the count of managed namespaces
-    pub fn namespace_count(&self) -> usize {
-        self.namespaces.len()
-    }
-
-    /// Get the count of active namespaces
-    pub fn active_namespace_count(&self) -> usize {
-        self.namespaces.values().filter(|ns| ns.is_active()).count()
-    }
-}
-
 /// Helper function to create D-Bus errors from SegwireError
 fn create_fdo_error(error: SegwireError) -> zbus::fdo::Error {
-    let dbus_error = DbusError::from(error);
+    let dbus_error = segwire_common::dbus::DbusError::from(error);
     zbus::fdo::Error::Failed(dbus_error.message().to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[monoio::test]
-    async fn test_namespace_manager_operations() {
-        let mut manager = NamespaceManager {
-            namespaces: HashMap::new(),
-            config_dir: PathBuf::from("/tmp"),
-            namespace_prefix: "test".to_string(),
-        };
-
-        // Test adding namespace
-        let ns = NamespaceState::new(
-            "test-ns".to_string(),
-            "test-test-ns".to_string(),
-            PathBuf::from("/tmp/test.toml"),
-        );
-        manager.add_namespace(ns);
-
-        assert_eq!(manager.namespace_count(), 1);
-        assert!(manager.get_namespace("test-ns").is_some());
-
-        // Test removing namespace
-        let removed = manager.remove_namespace("test-ns");
-        assert!(removed.is_some());
-        assert_eq!(manager.namespace_count(), 0);
-    }
-
-    #[test]
-    fn test_input_validation() {
-        // Test namespace name validation
-        assert!(interface_helpers::validate_namespace_name("valid-name").is_ok());
-        assert!(interface_helpers::validate_namespace_name("valid_name").is_ok());
-        assert!(interface_helpers::validate_namespace_name("validname123").is_ok());
-
-        assert!(interface_helpers::validate_namespace_name("").is_err());
-        assert!(interface_helpers::validate_namespace_name("invalid name").is_err());
-        assert!(interface_helpers::validate_namespace_name("invalid@name").is_err());
-
-        // Test config path validation
-        assert!(interface_helpers::validate_config_path("/path/to/config.toml").is_ok());
-        assert!(interface_helpers::validate_config_path("config.toml").is_ok());
-
-        assert!(interface_helpers::validate_config_path("").is_err());
-        assert!(interface_helpers::validate_config_path("config.txt").is_err());
-        assert!(interface_helpers::validate_config_path("../config.toml").is_err());
-    }
 }
