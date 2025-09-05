@@ -27,7 +27,7 @@ use std::io::Write;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Directory where named network namespaces are persisted.
 const NETNS_RUN_DIR: &str = "/var/run/netns";
@@ -603,6 +603,72 @@ impl NetlinkManager {
             interface_name, namespace_name
         );
         Ok(())
+    }
+
+    /// Move a network interface from a namespace back to the default namespace (PID 1).
+    pub fn move_interface_from_namespace_to_default(
+        &self,
+        namespace_name: &str,
+        interface_name: &str,
+    ) -> SegwireResult<()> {
+        self.validate_namespace_name(namespace_name)?;
+        self.validate_interface_name(interface_name)?;
+
+        if !self.namespace_exists(namespace_name)? {
+            return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
+        }
+
+        // Check if interface exists in the namespace
+        let ns_interfaces = self.list_namespace_interfaces(namespace_name)?;
+        if !ns_interfaces.iter().any(|name| name == interface_name) {
+            warn!(
+                "Interface '{}' not found in namespace '{}', skipping move",
+                interface_name, namespace_name
+            );
+            return Ok(());
+        }
+
+        let ns_name = namespace_name.to_string();
+        let iface_name = interface_name.to_string();
+        let iface_name_clone = iface_name.clone();
+
+        let result = self.run_in_namespace(&ns_name, move || {
+            // Get the interface index inside the namespace
+            let sock = open_netlink_socket().map_err(|e| e.to_string())?;
+            let ifindex =
+                get_interface_index_raw(&sock, &iface_name_clone).map_err(|e| e.to_string())?;
+
+            // Open the default namespace file descriptor
+            // The process's original namespace is what we want, assuming daemon runs in default netns.
+            // Since `run_in_namespace` runs in a new thread, the thread's netns is changed, but we can
+            // get the PID 1's netns safely, or we could have opened `/proc/self/ns/net` *before* the closure
+            // and passed it in.
+            // But doing open("/proc/1/ns/net") requires root, which we have.
+            let default_ns_fd = nix::fcntl::open(
+                "/proc/1/ns/net",
+                nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_CLOEXEC,
+                nix::sys::stat::Mode::empty(),
+            )
+            .map_err(|e| format!("open default ns fd: {}", e))?;
+
+            let mut msg = LinkMessage::default();
+            msg.header.index = ifindex;
+            msg.nlas.push(LinkNla::NetNsFd(default_ns_fd));
+
+            let mut nl_msg = NetlinkMessage::from(RtnlMessage::SetLink(msg));
+            nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            nl_msg.header.sequence_number = next_seq();
+            nl_msg.finalize();
+
+            netlink_request(&sock, nl_msg).map_err(|e| e.to_string())?;
+
+            let _ = nix::unistd::close(default_ns_fd);
+            Ok(())
+        })?;
+
+        result.map_err(|e| {
+            NetlinkError::InterfaceMoveFailed(iface_name, "default".to_string(), e).into()
+        })
     }
 
     /// Create a virtual ethernet (veth) pair.

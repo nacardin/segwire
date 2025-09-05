@@ -258,7 +258,7 @@ pub fn sanitize_config_path(path: &str, allowed_root: &Path) -> SegwireResult<Pa
     let path = Path::new(path);
 
     // Reject path traversal
-    check_path_traversal(path).map_err(|msg| SegwireError::Validation(msg))?;
+    check_path_traversal(path).map_err(SegwireError::Validation)?;
 
     // Resolve the path relative to the allowed root
     let resolved = if path.is_absolute() {
