@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Event loop coordination for the segwire daemon
 //!
 //! This module provides the main event loop implementation that coordinates
@@ -42,6 +40,7 @@ fn check_capabilities() -> SegwireResult<()> {
 /// - D-Bus service for CLI communication
 /// - Namespace state management and synchronization
 /// - Graceful shutdown handling with cleanup
+#[derive(Clone)]
 pub struct DaemonEventLoop {
     config_manager: Arc<Mutex<ConfigManager>>,
     dbus_service: Arc<DbusService>,
@@ -69,7 +68,11 @@ impl DaemonEventLoop {
         let config_manager = Arc::new(Mutex::new(ConfigManager::new(config_path.clone())?));
         log_info!(ctx, "Configuration loaded successfully");
 
-        // Get configuration values for D-Bus service initialization
+        // Initialize namespace state manager FIRST
+        let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new().await?));
+        log_info!(ctx, "Namespace state manager initialized successfully");
+
+        // Get configuration values for logging
         let (config_dir, namespace_prefix) = {
             let manager = config_manager.lock().await;
             (manager.get_config_dir(), manager.get_namespace_prefix())
@@ -80,12 +83,9 @@ impl DaemonEventLoop {
             .with_field("config_dir", config_dir.display().to_string());
 
         // Initialize D-Bus service
-        let dbus_service = Arc::new(DbusService::new(config_dir, namespace_prefix).await?);
+        let dbus_service =
+            Arc::new(DbusService::new(config_manager.clone(), state_manager.clone()).await?);
         log_info!(ctx, "D-Bus service initialized successfully");
-
-        // Initialize namespace state manager
-        let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new().await?));
-        log_info!(ctx, "Namespace state manager initialized successfully");
 
         // Create shutdown signal
         let shutdown_signal = Arc::new(AtomicBool::new(false));
@@ -427,6 +427,20 @@ impl DaemonEventLoop {
                                         warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
                                     }
                                 }
+
+                                // Auto-resolve Create/Delete conflicts
+                                for conflict in &result.conflicts {
+                                    match conflict.resolution {
+                                        crate::namespace_state::ConflictResolution::CreateNamespace |
+                                        crate::namespace_state::ConflictResolution::DeleteNamespace => {
+                                            if let Err(e) = state_mgr.resolve_conflict(conflict, &config_mgr).await {
+                                                warn!("Failed to auto-resolve conflict for {}: {}", conflict.namespace_name, e);
+                                            } else {
+                                                info!("Auto-resolved conflict for {}", conflict.namespace_name);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -461,31 +475,26 @@ impl DaemonEventLoop {
     /// with proper signal handling.
     fn spawn_signal_handling_task(&self) -> monoio::task::JoinHandle<()> {
         let shutdown_signal = self.shutdown_signal.clone();
+        let daemon_clone = self.clone();
 
         monoio::spawn(async move {
             info!("Signal handling task started");
 
-            // In a real implementation, this would use proper signal handling
-            // For now, we'll simulate signal handling with a timeout
-            // This allows the daemon to run for testing and be stopped externally
+            // Use ctrlc crate to handle SIGINT and SIGTERM
+            if let Err(e) = ctrlc::set_handler(move || {
+                info!("Received termination signal (SIGINT/SIGTERM)");
+                daemon_clone.request_shutdown();
+            }) {
+                error!("Error setting signal handler: {}", e);
+            }
 
-            // Wait for a reasonable amount of time or until shutdown is requested
-            let mut check_count = 0;
+            // Wait for shutdown to be requested by the handler or another task
             loop {
-                monoio::time::sleep(std::time::Duration::from_secs(1)).await;
-                check_count += 1;
-
-                // Check if shutdown was already requested by another task
                 if shutdown_signal.load(Ordering::Relaxed) {
-                    debug!("Shutdown already requested, signal handler exiting");
+                    debug!("Shutdown requested, signal handler exiting");
                     break;
                 }
-
-                // For testing purposes, we can add a timeout
-                // In production, this would be replaced with actual signal handling
-                if check_count % 60 == 0 {
-                    debug!("Signal handler heartbeat: {} minutes", check_count / 60);
-                }
+                monoio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
 
             info!("Signal handling task completed");
@@ -539,15 +548,38 @@ impl DaemonEventLoop {
                     );
                 }
 
-                // TODO: Implement actual namespace cleanup using netlink
-                // This would involve:
-                // 1. Moving interfaces back to default namespace
-                // 2. Deleting the network namespace
-                // 3. Cleaning up any associated resources
-                debug!(
-                    "Namespace cleanup for {} completed (placeholder)",
-                    namespace_name
-                );
+                // Actual namespace cleanup using netlink
+                if let Ok(netlink) = segwire_common::netlink::NetlinkManager::new() {
+                    let config_mgr = self.config_manager.lock().await;
+                    if let Some(config_entry) = config_mgr.get_namespace_config(&namespace_name) {
+                        // 1. Moving interfaces back to default namespace
+                        for if_name in &config_entry.config.interfaces.move_interfaces {
+                            if let Err(e) = netlink
+                                .move_interface_from_namespace_to_default(&namespace_name, if_name)
+                            {
+                                warn!(
+                                    "Failed to move interface {} from namespace {}: {}",
+                                    if_name, namespace_name, e
+                                );
+                            }
+                        }
+                    }
+
+                    // 2. Deleting the network namespace
+                    if let Err(e) = netlink.delete_namespace(&namespace_name) {
+                        warn!(
+                            "Failed to delete network namespace {}: {}",
+                            namespace_name, e
+                        );
+                    } else {
+                        info!("Successfully cleaned up namespace {}", namespace_name);
+                    }
+                } else {
+                    warn!(
+                        "Failed to initialize NetlinkManager for cleanup of {}",
+                        namespace_name
+                    );
+                }
             }
 
             info!("Namespace cleanup completed");
