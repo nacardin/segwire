@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Configuration management for segwire-daemon
 //!
 //! Handles loading and managing daemon configuration, including master configuration
@@ -144,11 +142,6 @@ impl ConfigManager {
         Ok(config)
     }
 
-    /// Get the daemon configuration
-    pub fn daemon_config(&self) -> &DaemonConfig {
-        &self.daemon_config
-    }
-
     /// Get the namespace prefix for this daemon instance
     pub fn namespace_prefix(&self) -> &str {
         &self.daemon_config.daemon.namespace_prefix
@@ -243,29 +236,9 @@ impl ConfigManager {
         }
     }
 
-    /// Get configuration file path resolution
-    pub fn resolve_config_path(&self, filename: &str) -> PathBuf {
-        self.daemon_config.daemon.config_dir.join(filename)
-    }
-
     /// Check if the daemon should cleanup namespaces on shutdown
     pub fn should_cleanup_on_shutdown(&self) -> bool {
         self.daemon_config.daemon.cleanup_on_shutdown
-    }
-
-    /// Get the configured log level
-    pub fn log_level(&self) -> &str {
-        &self.daemon_config.daemon.logging.level
-    }
-
-    /// Get D-Bus service configuration
-    pub fn dbus_service_name(&self) -> &str {
-        &self.daemon_config.dbus.service_name
-    }
-
-    /// Get D-Bus object path
-    pub fn dbus_object_path(&self) -> &str {
-        &self.daemon_config.dbus.object_path
     }
 
     /// Scan the configuration directory for namespace configuration files
@@ -487,6 +460,7 @@ impl ConfigManager {
     }
 
     /// Get detailed error information for configuration parsing
+    #[allow(dead_code)]
     pub fn validate_namespace_config_file(&self, config_path: &Path) -> SegwireResult<Vec<String>> {
         let mut errors = Vec::new();
 
@@ -568,9 +542,6 @@ impl ConfigManager {
     pub fn get_config_stats(&self) -> ConfigStats {
         ConfigStats {
             total_configs: self.namespace_configs.len(),
-            namespace_prefix: self.namespace_prefix().to_string(),
-            config_directory: self.config_directory().to_path_buf(),
-            loaded_namespaces: self.namespace_configs.keys().cloned().collect(),
         }
     }
 }
@@ -579,9 +550,6 @@ impl ConfigManager {
 #[derive(Debug, Clone)]
 pub struct ConfigStats {
     pub total_configs: usize,
-    pub namespace_prefix: String,
-    pub config_directory: PathBuf,
-    pub loaded_namespaces: Vec<String>,
 }
 
 /// File system event types for configuration monitoring
@@ -853,14 +821,6 @@ object_path = "/org/segwire/NamespaceManager"
             config_manager.config_directory(),
             temp_dir.path().join("namespaces")
         );
-        assert_eq!(
-            config_manager.dbus_service_name(),
-            "org.segwire.NamespaceManager"
-        );
-        assert_eq!(
-            config_manager.dbus_object_path(),
-            "/org/segwire/NamespaceManager"
-        );
     }
 
     #[test]
@@ -950,13 +910,8 @@ object_path = "/org/segwire/NamespaceManager"
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "test");
 
-        let config_manager =
+        let _config_manager =
             ConfigManager::new(config_path).expect("Failed to create config manager");
-
-        let resolved_path = config_manager.resolve_config_path("app.toml");
-        let expected_path = temp_dir.path().join("namespaces").join("app.toml");
-
-        assert_eq!(resolved_path, expected_path);
     }
 
     #[test]
@@ -994,7 +949,7 @@ object_path = "/org/segwire/NamespaceManager"
             .expect("Failed to reload config");
 
         assert_eq!(config_manager.namespace_prefix(), "updated");
-        assert_eq!(config_manager.log_level(), "debug");
+
         // Note: log_target is a config field but no accessor method exists yet
         assert!(!config_manager.should_cleanup_on_shutdown());
     }
@@ -1256,11 +1211,6 @@ description = "App with wrong prefix"
         let stats = config_manager.get_config_stats();
 
         assert_eq!(stats.total_configs, 2);
-        assert_eq!(stats.namespace_prefix, "test");
-        assert_eq!(stats.config_directory, temp_dir.path().join("namespaces"));
-        assert_eq!(stats.loaded_namespaces.len(), 2);
-        assert!(stats.loaded_namespaces.contains(&"test-app1".to_string()));
-        assert!(stats.loaded_namespaces.contains(&"test-app2".to_string()));
     }
 
     #[monoio::test]

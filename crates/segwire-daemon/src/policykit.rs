@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! PolicyKit integration for D-Bus authorization
 //!
 //! Provides authorization checking for D-Bus method calls using PolicyKit,
@@ -7,7 +5,7 @@
 
 use segwire_common::error::SegwireError;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use zbus::Connection;
 
 /// PolicyKit authorization checker
@@ -22,34 +20,13 @@ impl PolicyKitAuthorizer {
         let mut action_mappings = HashMap::new();
 
         // Map D-Bus method names to PolicyKit actions
-        action_mappings.insert(
-            "list".to_string(),
-            "org.segwire.namespace.status".to_string(),
-        );
-        action_mappings.insert(
-            "status".to_string(),
-            "org.segwire.namespace.status".to_string(),
-        );
-        action_mappings.insert(
-            "create".to_string(),
-            "org.segwire.namespace.create".to_string(),
-        );
-        action_mappings.insert(
-            "delete".to_string(),
-            "org.segwire.namespace.delete".to_string(),
-        );
-        action_mappings.insert(
-            "restart".to_string(),
-            "org.segwire.namespace.delete".to_string(),
-        );
-        action_mappings.insert(
-            "reload".to_string(),
-            "org.segwire.namespace.manage".to_string(),
-        );
-        action_mappings.insert(
-            "validate".to_string(),
-            "org.segwire.namespace.status".to_string(),
-        );
+        action_mappings.insert("list".to_string(), actions::STATUS.to_string());
+        action_mappings.insert("status".to_string(), actions::STATUS.to_string());
+        action_mappings.insert("create".to_string(), actions::CREATE.to_string());
+        action_mappings.insert("delete".to_string(), actions::DELETE.to_string());
+        action_mappings.insert("restart".to_string(), actions::DELETE.to_string());
+        action_mappings.insert("reload".to_string(), actions::MANAGE.to_string());
+        action_mappings.insert("validate".to_string(), actions::STATUS.to_string());
 
         Self {
             _connection: connection,
@@ -118,27 +95,6 @@ impl PolicyKitAuthorizer {
         }
     }
 
-    /// Basic authorization check (placeholder for full PolicyKit integration)
-    async fn check_basic_authorization(&self, action_id: &str) -> Result<(), SegwireError> {
-        // TODO: Implement full PolicyKit integration
-        // This would involve:
-        // 1. Getting the process info for the sender from D-Bus context
-        // 2. Calling org.freedesktop.PolicyKit1.Authority.CheckAuthorization
-        // 3. Handling interactive authentication if needed
-        // 4. Returning the authorization result
-
-        debug!("Basic authorization check for action '{}'", action_id);
-
-        // For development purposes, we'll allow all operations but log them
-        // In production, this should be replaced with actual PolicyKit calls
-        info!(
-            "Authorization check passed (development mode) - action: {}",
-            action_id
-        );
-
-        Ok(())
-    }
-
     /// Get the process information for a D-Bus sender
     async fn get_sender_process_info(
         &self,
@@ -173,8 +129,8 @@ impl PolicyKitAuthorizer {
         action_id: &str,
     ) -> Result<AuthorizationResult, SegwireError> {
         debug!(
-            "Calling PolicyKit CheckAuthorization for PID {} and action '{}'",
-            process_info.pid, action_id
+            "Calling PolicyKit CheckAuthorization for PID {} (UID {}) and action '{}'",
+            process_info.pid, process_info.uid, action_id
         );
 
         // TODO: Implement actual PolicyKit D-Bus call
@@ -197,6 +153,7 @@ struct ProcessInfo {
 
 /// Result of a PolicyKit authorization check
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 enum AuthorizationResult {
     /// The action is authorized
     Authorized,
@@ -221,71 +178,6 @@ pub mod actions {
 
     /// Manage daemon configuration and reload
     pub const MANAGE: &str = "org.segwire.namespace.manage";
-
-    /// Administrative operations (full access)
-    pub const ADMIN: &str = "org.segwire.namespace.admin";
-}
-
-/// Helper function to create PolicyKit policy file content
-pub fn generate_policykit_policy() -> &'static str {
-    r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE policyconfig PUBLIC
- "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
- "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
-<policyconfig>
-  <vendor>Segwire Project</vendor>
-  <vendor_url>https://github.com/segwire/segwire</vendor_url>
-
-  <action id="org.segwire.namespace.status">
-    <description>View network namespace status</description>
-    <message>Authentication is required to view network namespace status</message>
-    <defaults>
-      <allow_any>yes</allow_any>
-      <allow_inactive>yes</allow_inactive>
-      <allow_active>yes</allow_active>
-    </defaults>
-  </action>
-
-  <action id="org.segwire.namespace.create">
-    <description>Create network namespaces</description>
-    <message>Authentication is required to create network namespaces</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-  </action>
-
-  <action id="org.segwire.namespace.delete">
-    <description>Delete network namespaces</description>
-    <message>Authentication is required to delete network namespaces</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-  </action>
-
-  <action id="org.segwire.namespace.manage">
-    <description>Manage daemon configuration</description>
-    <message>Authentication is required to manage daemon configuration</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-  </action>
-
-  <action id="org.segwire.namespace.admin">
-    <description>Full administrative access to namespace management</description>
-    <message>Authentication is required for administrative access</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-  </action>
-</policyconfig>"#
 }
 
 #[cfg(test)]
@@ -336,15 +228,5 @@ mod tests {
             AuthorizationResult::Failed(msg) => assert_eq!(msg, "test"),
             _ => panic!("Expected Failed variant"),
         }
-    }
-
-    #[test]
-    fn test_policy_generation() {
-        let policy = generate_policykit_policy();
-        assert!(policy.contains("org.segwire.namespace.status"));
-        assert!(policy.contains("org.segwire.namespace.create"));
-        assert!(policy.contains("org.segwire.namespace.delete"));
-        assert!(policy.contains("org.segwire.namespace.manage"));
-        assert!(policy.contains("org.segwire.namespace.admin"));
     }
 }

@@ -28,7 +28,11 @@ async fn main() -> Result<()> {
     let client = match DbusClient::new().await {
         Ok(client) => client,
         Err(e) => {
-            eprintln!("Failed to connect to segwire daemon: {}", e);
+            if let Some(dbus_err) = e.downcast_ref::<zbus::Error>() {
+                eprintln!("{}", dbus_client::utils::format_dbus_error(dbus_err));
+            } else {
+                eprintln!("Failed to connect to segwire daemon: {}", e);
+            }
             eprintln!("Make sure segwire-daemon is running and accessible via D-Bus");
             std::process::exit(1);
         }
