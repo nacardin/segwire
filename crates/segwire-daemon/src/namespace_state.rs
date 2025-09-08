@@ -631,7 +631,6 @@ enum SyncAction {
 /// Statistics about namespace state
 #[derive(Debug, Clone)]
 pub struct StateStats {
-    #[allow(dead_code)]
     pub total_namespaces: usize,
     pub active_namespaces: usize,
     pub creating_namespaces: usize,
@@ -649,7 +648,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Prepared utility for future sync/conflict tests
     fn create_test_config_entry(name: &str, temp_dir: &TempDir) -> NamespaceConfigEntry {
         let config_content = format!(
             r#"

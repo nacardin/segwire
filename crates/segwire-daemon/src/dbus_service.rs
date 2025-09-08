@@ -524,8 +524,8 @@ impl NamespaceManagerInterface {
         let version = env!("CARGO_PKG_VERSION").to_string();
 
         debug!(
-            "Daemon status: version={}, uptime={}s, managed={}, active={}",
-            version, uptime, managed_count, active_count
+            "Daemon status: version={}, uptime={}s, managed={}, active={}, total_tracked={}",
+            version, uptime, managed_count, active_count, state_stats.total_namespaces
         );
 
         Ok((version, uptime, managed_count, active_count))

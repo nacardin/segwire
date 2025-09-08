@@ -1,11 +1,10 @@
-#![allow(dead_code)]
-
 use crate::dbus_client::DbusClient;
 use anyhow::Result;
 use clap::Args;
 use std::path::PathBuf;
 
 /// Trait for D-Bus client operations needed by validate command
+#[allow(dead_code)] // Used via generic validate_configurations<T> internally
 trait ValidateDbusClient {
     async fn is_service_available(&self) -> bool;
 }

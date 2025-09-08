@@ -40,10 +40,8 @@ pub async fn execute(client: DbusClient, args: ReloadArgs) -> Result<()> {
 }
 
 async fn reload_configuration(client: &DbusClient, args: &ReloadArgs) -> Result<()> {
-    if args.validate {
-        if args.verbose {
-            println!("Validating configurations before reload...");
-        }
+    if args.validate && args.verbose {
+        println!("Validating configurations before reload...");
         // TODO: call client.validate_configuration() for each file
     }
 

@@ -13,7 +13,6 @@ const REQUIRED_CAPABILITIES: &[&str] = &["cap_sys_admin"];
 
 /// Result of a capability check.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CapabilityCheckResult {
     pub has_required_capabilities: bool,
     pub is_root: bool,
@@ -33,6 +32,9 @@ impl std::fmt::Display for CapabilityCheckResult {
                 "Privilege check FAILED – missing: {}",
                 self.missing_capabilities.join(", ")
             )?;
+        }
+        if self.is_root {
+            write!(f, " [root]")?;
         }
         if self.is_container {
             write!(

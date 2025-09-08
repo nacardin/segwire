@@ -460,7 +460,7 @@ impl ConfigManager {
     }
 
     /// Get detailed error information for configuration parsing
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn validate_namespace_config_file(&self, config_path: &Path) -> SegwireResult<Vec<String>> {
         let mut errors = Vec::new();
 
