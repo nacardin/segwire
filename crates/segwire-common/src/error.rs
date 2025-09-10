@@ -286,3 +286,78 @@ impl From<crate::dbus::DbusError> for SegwireError {
 
 /// Convenience type alias for Results with SegwireError
 pub type SegwireResult<T> = Result<T, SegwireError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_context_creation() {
+        let ctx = ErrorContext::new("test_op")
+            .with_namespace("test_ns")
+            .with_config_path(std::path::PathBuf::from("/etc/test.toml"))
+            .with_field("key", "value")
+            .with_remediation("fix it");
+
+        assert_eq!(ctx.operation, "test_op");
+        assert_eq!(ctx.namespace.as_deref(), Some("test_ns"));
+        assert_eq!(
+            ctx.config_path.as_deref(),
+            Some(std::path::Path::new("/etc/test.toml"))
+        );
+        assert_eq!(ctx.fields.get("key").map(|s| s.as_str()), Some("value"));
+        assert_eq!(ctx.remediation, vec!["fix it"]);
+    }
+
+    #[test]
+    fn test_segwire_error_recoverable() {
+        assert!(SegwireError::Config(ConfigError::FileNotFound("".into())).is_recoverable());
+        assert!(SegwireError::Network("".into()).is_recoverable());
+        assert!(SegwireError::Validation("".into()).is_recoverable());
+        assert!(!SegwireError::Permission("".into()).is_recoverable());
+        assert!(!SegwireError::System(std::io::Error::from_raw_os_error(1)).is_recoverable());
+    }
+
+    #[test]
+    fn test_segwire_error_category() {
+        assert_eq!(
+            SegwireError::Config(ConfigError::FileNotFound("".into())).category(),
+            "configuration"
+        );
+        assert_eq!(SegwireError::Network("".into()).category(), "network");
+        assert_eq!(SegwireError::Permission("".into()).category(), "permission");
+        assert_eq!(
+            SegwireError::System(std::io::Error::from_raw_os_error(1)).category(),
+            "system"
+        );
+        assert_eq!(SegwireError::Validation("".into()).category(), "validation");
+    }
+
+    #[test]
+    fn test_segwire_error_remediation() {
+        let config_err = SegwireError::Config(ConfigError::MissingField("test".into()));
+        assert!(config_err
+            .remediation_steps()
+            .iter()
+            .any(|s| s.contains("test")));
+
+        let perm_err = SegwireError::Permission("".into());
+        assert!(perm_err
+            .remediation_steps()
+            .iter()
+            .any(|s| s.contains("CAP_SYS_ADMIN")));
+    }
+
+    #[test]
+    fn test_contextual_error() {
+        let err = SegwireError::Network("test".into());
+        let ctx_err = err.with_context(ErrorContext::new("op"));
+        assert_eq!(
+            ctx_err.to_string(),
+            "Network operation failed: test (operation: op)"
+        );
+
+        let returned_err = ctx_err.log_and_return();
+        assert!(matches!(returned_err, SegwireError::Network(_)));
+    }
+}
