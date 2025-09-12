@@ -56,7 +56,13 @@ impl DbusClient {
         let mut last_error = None;
 
         for attempt in 1..=MAX_RETRY_ATTEMPTS {
-            match Connection::system().await {
+            let conn_res = if cfg!(test) || std::env::var("SEGWIRE_TEST_SESSION_BUS").is_ok() {
+                Connection::session().await
+            } else {
+                Connection::system().await
+            };
+
+            match conn_res {
                 Ok(connection) => {
                     tracing::debug!("Successfully connected to D-Bus on attempt {}", attempt);
                     return Ok(connection);

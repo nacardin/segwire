@@ -984,3 +984,38 @@ fn create_fdo_error(error: SegwireError) -> zbus::fdo::Error {
     let dbus_error = segwire_common::dbus::DbusError::from(error);
     zbus::fdo::Error::Failed(dbus_error.message().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use segwire_common::error::ConfigError;
+
+    #[test]
+    fn test_create_fdo_error() {
+        let err = SegwireError::Config(ConfigError::InvalidToml(
+            toml::from_str::<toml::Value>("invalid = [").unwrap_err(),
+        ));
+        let fdo_err = create_fdo_error(err);
+        match fdo_err {
+            zbus::fdo::Error::Failed(msg) => {
+                assert!(msg.contains("Invalid TOML syntax"));
+            }
+            _ => panic!("Expected Failed error"),
+        }
+    }
+
+    #[test]
+    fn test_create_fdo_error_generic() {
+        let err = SegwireError::System(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        let fdo_err = create_fdo_error(err);
+        match fdo_err {
+            zbus::fdo::Error::Failed(msg) => {
+                assert!(msg.contains("file missing"));
+            }
+            _ => panic!("Expected Failed error"),
+        }
+    }
+}

@@ -1,12 +1,6 @@
-mod capabilities;
-mod config;
-mod dbus_service;
-mod event_loop;
-mod namespace_state;
-mod policykit;
-
-use event_loop::DaemonEventLoop;
 use segwire_common::{init_logging, DaemonConfig, LogConfig, LogLevel, SegwireResult};
+use segwire_daemon::capabilities;
+use segwire_daemon::event_loop::DaemonEventLoop;
 use std::path::PathBuf;
 use tracing::info;
 

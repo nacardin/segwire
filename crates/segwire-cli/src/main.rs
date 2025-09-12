@@ -1,12 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 
-mod commands;
-mod dbus_client;
-pub mod output;
-
-use commands::{Cli, Commands};
-use dbus_client::DbusClient;
+use segwire_cli::commands::{self, Cli, Commands};
+use segwire_cli::dbus_client::{self, DbusClient};
 
 #[monoio::main]
 async fn main() -> Result<()> {

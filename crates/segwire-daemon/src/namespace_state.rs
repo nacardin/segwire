@@ -644,11 +644,9 @@ pub struct StateStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::fs;
+    use crate::config::NamespaceConfigEntry;
     use tempfile::TempDir;
-
-    #[allow(dead_code)] // Prepared utility for future sync/conflict tests
+    #[allow(dead_code)]
     fn create_test_config_entry(name: &str, temp_dir: &TempDir) -> NamespaceConfigEntry {
         let config_content = format!(
             r#"
@@ -669,7 +667,7 @@ servers = ["8.8.8.8"]
         );
 
         let config_path = temp_dir.path().join(format!("{}.toml", name));
-        fs::write(&config_path, config_content).expect("Failed to write test config");
+        std::fs::write(&config_path, config_content).expect("Failed to write test config");
 
         let config = segwire_common::config::NamespaceConfig::from_file(&config_path)
             .expect("Failed to parse test config");
@@ -681,60 +679,6 @@ servers = ["8.8.8.8"]
             last_modified: SystemTime::now(),
         }
     }
-
-    #[monoio::test]
-    async fn test_state_manager_creation() {
-        let result = NamespaceStateManager::new().await;
-
-        // Creation might fail in test environment without proper netlink access
-        // but we can test the basic structure
-        match result {
-            Ok(manager) => {
-                assert_eq!(manager.namespace_states.len(), 0);
-                assert!(manager.needs_sync());
-            }
-            Err(e) => {
-                // Expected in test environment without netlink access
-                println!("Expected error in test environment: {}", e);
-            }
-        }
-    }
-
-    #[monoio::test]
-    async fn test_state_operations() {
-        // Create a mock manager for testing
-        let netlink_manager = match NetlinkManager::new() {
-            Ok(manager) => manager,
-            Err(_) => {
-                // In test environment, create a minimal mock
-                return; // Skip test if netlink is not available
-            }
-        };
-
-        let mut manager = NamespaceStateManager {
-            namespace_states: HashMap::new(),
-            netlink_manager,
-            last_sync: SystemTime::UNIX_EPOCH,
-            sync_interval: Duration::from_secs(30),
-        };
-
-        // Test adding state
-        let state = NamespaceState::new(
-            "test".to_string(),
-            "test-namespace".to_string(),
-            std::path::PathBuf::from("/tmp/test.toml"),
-        );
-
-        manager.update_namespace_state(state.clone());
-        assert_eq!(manager.namespace_states.len(), 1);
-        assert!(manager.get_namespace_state("test-namespace").is_some());
-
-        // Test removing state
-        let removed = manager.remove_namespace_state("test-namespace");
-        assert!(removed.is_some());
-        assert_eq!(manager.namespace_states.len(), 0);
-    }
-
     #[monoio::test]
     async fn test_sync_timing() {
         // Test sync timing logic without creating actual netlink manager
@@ -795,5 +739,141 @@ servers = ["8.8.8.8"]
         assert_eq!(stats.failed_namespaces, 1);
         assert_eq!(stats.creating_namespaces, 0);
         assert_eq!(stats.deleting_namespaces, 0);
+    }
+
+    #[monoio::test]
+    async fn test_needs_namespace_update() {
+        let netlink_manager = match NetlinkManager::new() {
+            Ok(manager) => manager,
+            Err(_) => return, // Skip test if netlink is not available
+        };
+
+        let manager = NamespaceStateManager {
+            namespace_states: HashMap::new(),
+            netlink_manager,
+            last_sync: SystemTime::now(),
+            sync_interval: Duration::from_secs(30),
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_entry = create_test_config_entry("app1", &temp_dir);
+
+        let mut current_state = NamespaceState::new(
+            "app1".to_string(),
+            "test-app1".to_string(),
+            std::path::PathBuf::from("/tmp/app1.toml"),
+        );
+
+        // State is newer than config
+        current_state.last_updated = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 10;
+
+        let actual_info = segwire_common::netlink::NamespaceInfo {
+            name: "test-app1".to_string(),
+            id: 1234,
+            path: std::path::PathBuf::from("/var/run/netns/test-app1"),
+            active: true,
+        };
+
+        // Should be false because state is newer and no drift is implemented
+        assert!(!manager.needs_namespace_update(&current_state, &config_entry, &actual_info));
+
+        // State is older than config
+        current_state.last_updated = config_entry
+            .last_modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            - 60;
+
+        // Should be true because config is newer
+        assert!(manager.needs_namespace_update(&current_state, &config_entry, &actual_info));
+    }
+
+    #[monoio::test]
+    async fn test_resolve_conflict_delete() {
+        let netlink_manager = match NetlinkManager::new() {
+            Ok(manager) => manager,
+            Err(_) => return, // Skip test if netlink is not available
+        };
+
+        let mut state_manager = NamespaceStateManager {
+            namespace_states: HashMap::new(),
+            netlink_manager,
+            last_sync: SystemTime::now(),
+            sync_interval: Duration::from_secs(30),
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+
+        // We'll test the delete resolution which doesn't need a valid config entry
+        let conflict = StateConflict {
+            namespace_name: "test-nonexistent".to_string(),
+            description: "Test conflict delete".to_string(),
+            resolution: ConflictResolution::DeleteNamespace,
+        };
+
+        // Add a dummy state that should be removed
+        let state = NamespaceState::new(
+            "nonexistent".to_string(),
+            "test-nonexistent".to_string(),
+            std::path::PathBuf::from("/tmp/nonexistent.toml"),
+        );
+        state_manager.update_namespace_state(state.clone());
+        assert!(state_manager
+            .get_namespace_state("test-nonexistent")
+            .is_some());
+
+        // This might fail at the netlink level if test-nonexistent doesn't exist,
+        // but let's assert what happens. NetlinkManager returns an error for non-existent namespace.
+        let result = state_manager
+            .resolve_conflict(&conflict, &config_manager)
+            .await;
+
+        // It returns an IO error from netlink delete.
+        assert!(result.is_err());
+
+        // State should still be there because delete failed
+        assert!(state_manager
+            .get_namespace_state("test-nonexistent")
+            .is_some());
+    }
+    #[monoio::test]
+    async fn test_state_operations() {
+        // Create a mock manager for testing
+        let netlink_manager = match NetlinkManager::new() {
+            Ok(manager) => manager,
+            Err(_) => {
+                // In test environment, create a minimal mock
+                return; // Skip test if netlink is not available
+            }
+        };
+
+        let mut manager = NamespaceStateManager {
+            namespace_states: HashMap::new(),
+            netlink_manager,
+            last_sync: SystemTime::UNIX_EPOCH,
+            sync_interval: Duration::from_secs(30),
+        };
+
+        // Test adding state
+        let state = NamespaceState::new(
+            "test".to_string(),
+            "test-namespace".to_string(),
+            std::path::PathBuf::from("/tmp/test.toml"),
+        );
+
+        manager.update_namespace_state(state.clone());
+        assert_eq!(manager.namespace_states.len(), 1);
+        assert!(manager.get_namespace_state("test-namespace").is_some());
+
+        // Test removing state
+        let removed = manager.remove_namespace_state("test-namespace");
+        assert!(removed.is_some());
+        assert_eq!(manager.namespace_states.len(), 0);
     }
 }

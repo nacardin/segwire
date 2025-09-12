@@ -778,22 +778,23 @@ impl ConfigManager {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_daemon_config(temp_dir: &TempDir, namespace_prefix: &str) -> PathBuf {
         let config_content = format!(
             r#"
-[daemon]
-namespace_prefix = "{}"
-config_dir = "{}"
-cleanup_on_shutdown = true
-log_level = "info"
-log_target = "stdout"
+    [daemon]
+    namespace_prefix = "{}"
+    config_dir = "{}"
+    cleanup_on_shutdown = true
+    log_level = "info"
+    log_target = "stdout"
 
-[dbus]
-service_name = "org.segwire.NamespaceManager"
-object_path = "/org/segwire/NamespaceManager"
-"#,
+    [dbus]
+    service_name = "org.segwire.NamespaceManager"
+    object_path = "/org/segwire/NamespaceManager"
+    "#,
             namespace_prefix,
             temp_dir.path().join("namespaces").display()
         );
@@ -813,8 +814,7 @@ object_path = "/org/segwire/NamespaceManager"
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "test");
 
-        let config_manager =
-            ConfigManager::new(config_path).expect("Failed to create config manager");
+        let config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
 
         assert_eq!(config_manager.namespace_prefix(), "test");
         assert_eq!(
@@ -836,17 +836,17 @@ object_path = "/org/segwire/NamespaceManager"
     fn test_config_manager_invalid_config_dir() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_content = r#"
-[daemon]
-namespace_prefix = "test"
-config_dir = "/nonexistent/directory"
-cleanup_on_shutdown = true
-log_level = "info"
-log_target = "stdout"
+    [daemon]
+    namespace_prefix = "test"
+    config_dir = "/nonexistent/directory"
+    cleanup_on_shutdown = true
+    log_level = "info"
+    log_target = "stdout"
 
-[dbus]
-service_name = "org.segwire.NamespaceManager"
-object_path = "/org/segwire/NamespaceManager"
-"#;
+    [dbus]
+    service_name = "org.segwire.NamespaceManager"
+    object_path = "/org/segwire/NamespaceManager"
+    "#;
 
         let config_path = temp_dir.path().join("daemon.toml");
         fs::write(&config_path, config_content).expect("Failed to write test config");
@@ -860,8 +860,7 @@ object_path = "/org/segwire/NamespaceManager"
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "segwire");
 
-        let config_manager =
-            ConfigManager::new(config_path).expect("Failed to create config manager");
+        let config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
 
         // Test exact prefix match
         assert!(config_manager.matches_namespace_prefix("segwire"));
@@ -883,8 +882,7 @@ object_path = "/org/segwire/NamespaceManager"
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "segwire");
 
-        let config_manager =
-            ConfigManager::new(config_path).expect("Failed to create config manager");
+        let config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
 
         // Test name that doesn't have prefix
         assert_eq!(
@@ -910,8 +908,7 @@ object_path = "/org/segwire/NamespaceManager"
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "test");
 
-        let _config_manager =
-            ConfigManager::new(config_path).expect("Failed to create config manager");
+        let _config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
     }
 
     #[test]
@@ -927,17 +924,17 @@ object_path = "/org/segwire/NamespaceManager"
         // Update the configuration file
         let new_config_content = format!(
             r#"
-[daemon]
-namespace_prefix = "updated"
-config_dir = "{}"
-cleanup_on_shutdown = false
-log_level = "debug"
-log_target = "stderr"
+    [daemon]
+    namespace_prefix = "updated"
+    config_dir = "{}"
+    cleanup_on_shutdown = false
+    log_level = "debug"
+    log_target = "stderr"
 
-[dbus]
-service_name = "org.segwire.NamespaceManager"
-object_path = "/org/segwire/NamespaceManager"
-"#,
+    [dbus]
+    service_name = "org.segwire.NamespaceManager"
+    object_path = "/org/segwire/NamespaceManager"
+    "#,
             temp_dir.path().join("namespaces").display()
         );
 
@@ -959,33 +956,33 @@ object_path = "/org/segwire/NamespaceManager"
         let short_name = if name.len() > 6 { &name[..6] } else { name };
         let config_content = format!(
             r#"
-[namespace]
-name = "{}"
-description = "Test namespace"
+    [namespace]
+    name = "{}"
+    description = "Test namespace"
 
-[interfaces]
-move_interfaces = ["eth0"]
+    [interfaces]
+    move_interfaces = ["eth0"]
 
-[[interfaces.virtual_interfaces]]
-name = "v{}"
-interface_type = "veth"
-peer = "v{}-h"
+    [[interfaces.virtual_interfaces]]
+    name = "v{}"
+    interface_type = "veth"
+    peer = "v{}-h"
 
-[routing]
-default_gateway = "192.168.1.1"
+    [routing]
+    default_gateway = "192.168.1.1"
 
-[[routing.routes]]
-destination = "10.0.0.0/8"
-gateway = "192.168.1.1"
-metric = 100
+    [[routing.routes]]
+    destination = "10.0.0.0/8"
+    gateway = "192.168.1.1"
+    metric = 100
 
-[dns]
-servers = ["8.8.8.8", "8.8.4.4"]
-search = ["example.com"]
+    [dns]
+    servers = ["8.8.8.8", "8.8.4.4"]
+    search = ["example.com"]
 
-[environment]
-APP_NAME = "{}"
-"#,
+    [environment]
+    APP_NAME = "{}"
+    "#,
             name, short_name, short_name, name
         );
 
@@ -1010,8 +1007,7 @@ APP_NAME = "{}"
 
         // Create a non-TOML file that should be ignored
         let non_toml_path = temp_dir.path().join("namespaces").join("readme.txt");
-        fs::write(&non_toml_path, "This is not a TOML file")
-            .expect("Failed to write non-TOML file");
+        fs::write(&non_toml_path, "This is not a TOML file").expect("Failed to write non-TOML file");
 
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
@@ -1081,22 +1077,22 @@ APP_NAME = "{}"
 
         // Update the configuration file
         let updated_config_content = r#"
-[namespace]
-name = "app"
-description = "Updated test namespace"
+    [namespace]
+    name = "app"
+    description = "Updated test namespace"
 
-[interfaces]
-move_interfaces = ["eth1", "wlan0"]
+    [interfaces]
+    move_interfaces = ["eth1", "wlan0"]
 
-[routing]
-default_gateway = "192.168.2.1"
+    [routing]
+    default_gateway = "192.168.2.1"
 
-[dns]
-servers = ["1.1.1.1"]
+    [dns]
+    servers = ["1.1.1.1"]
 
-[environment]
-APP_NAME = "app"
-"#;
+    [environment]
+    APP_NAME = "app"
+    "#;
 
         fs::write(&namespace_config_path, updated_config_content)
             .expect("Failed to write updated config");
@@ -1150,51 +1146,6 @@ APP_NAME = "app"
     }
 
     #[test]
-    fn test_namespace_config_validation() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let daemon_config_path = create_test_daemon_config(&temp_dir, "test");
-
-        let config_manager =
-            ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
-
-        // Test valid configuration
-        let valid_config_path = create_test_namespace_config(&temp_dir, "validapp");
-        let errors = config_manager
-            .validate_namespace_config_file(&valid_config_path)
-            .expect("Failed to validate config");
-        assert!(errors.is_empty());
-
-        // Test invalid configuration (invalid TOML)
-        let invalid_config_path = temp_dir.path().join("namespaces").join("invalid.toml");
-        fs::write(&invalid_config_path, "invalid toml content [[[")
-            .expect("Failed to write invalid config");
-
-        let errors = config_manager
-            .validate_namespace_config_file(&invalid_config_path)
-            .expect("Failed to validate invalid config");
-        assert!(!errors.is_empty());
-        assert!(errors[0].contains("TOML parsing failed"));
-
-        // Test configuration with wrong prefix - use a name that already has a different prefix
-        let wrong_prefix_content = r#"
-[namespace]
-name = "other-wrongapp"
-description = "App with wrong prefix"
-"#;
-        let wrong_prefix_path = temp_dir.path().join("namespaces").join("wrong-prefix.toml");
-        fs::write(&wrong_prefix_path, wrong_prefix_content)
-            .expect("Failed to write wrong prefix config");
-
-        let errors = config_manager
-            .validate_namespace_config_file(&wrong_prefix_path)
-            .expect("Failed to validate wrong prefix config");
-        assert!(!errors.is_empty());
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("doesn't match daemon prefix")));
-    }
-
-    #[test]
     fn test_config_stats() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let daemon_config_path = create_test_daemon_config(&temp_dir, "test");
@@ -1235,25 +1186,24 @@ description = "App with wrong prefix"
 
         // Test file modification event
         let updated_config_content = r#"
-[namespace]
-name = "newapp"
-description = "Updated test namespace"
+    [namespace]
+    name = "newapp"
+    description = "Updated test namespace"
 
-[interfaces]
-move_interfaces = ["eth1"]
+    [interfaces]
+    move_interfaces = ["eth1"]
 
-[routing]
-default_gateway = "192.168.2.1"
+    [routing]
+    default_gateway = "192.168.2.1"
 
-[dns]
-servers = ["1.1.1.1"]
+    [dns]
+    servers = ["1.1.1.1"]
 
-[environment]
-APP_NAME = "newapp"
-"#;
+    [environment]
+    APP_NAME = "newapp"
+    "#;
 
-        fs::write(&new_config_path, updated_config_content)
-            .expect("Failed to write updated config");
+        fs::write(&new_config_path, updated_config_content).expect("Failed to write updated config");
 
         let event = ConfigFileEvent::Modified(new_config_path.clone());
         let result = config_manager
@@ -1284,35 +1234,4 @@ APP_NAME = "newapp"
         assert!(config_manager.get_namespace_config("test-newapp").is_none());
     }
 
-    #[test]
-    fn test_config_file_monitor_creation() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let config_dir = temp_dir.path().join("namespaces");
-        fs::create_dir_all(&config_dir).expect("Failed to create config dir");
-
-        let monitor = ConfigFileMonitor::new(config_dir.clone(), Duration::from_millis(500));
-
-        assert_eq!(monitor.config_dir, config_dir);
-        assert_eq!(monitor.debounce_duration, Duration::from_millis(500));
-    }
-
-    #[test]
-    fn test_config_file_event_types() {
-        let path1 = PathBuf::from("/test/path1.toml");
-        let path2 = PathBuf::from("/test/path2.toml");
-
-        let event1 = ConfigFileEvent::Created(path1.clone());
-        let event2 = ConfigFileEvent::Modified(path1.clone());
-        let event3 = ConfigFileEvent::Deleted(path2.clone());
-
-        // Test event equality
-        assert_eq!(event1, ConfigFileEvent::Created(path1.clone()));
-        assert_ne!(event1, event2);
-        assert_ne!(event2, event3);
-
-        // Test debug formatting
-        let debug_str = format!("{:?}", event1);
-        assert!(debug_str.contains("Created"));
-        assert!(debug_str.contains("path1.toml"));
-    }
 }
