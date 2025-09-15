@@ -90,6 +90,24 @@ impl NamespaceStateManager {
         })
     }
 
+    /// Create a namespace state manager, auto-selecting real or simulated mode
+    /// based on the `SEGWIRE_SIMULATION` env var.
+    pub async fn new_auto() -> SegwireResult<Self> {
+        info!("Initializing namespace state manager (auto-detect mode)");
+
+        let netlink_manager = NetlinkManager::new_auto().map_err(|e| {
+            error!("Failed to initialize netlink manager: {}", e);
+            e
+        })?;
+
+        Ok(Self {
+            namespace_states: HashMap::new(),
+            netlink_manager,
+            last_sync: SystemTime::UNIX_EPOCH,
+            sync_interval: Duration::from_secs(30),
+        })
+    }
+
     /// Get the current state of all managed namespaces
     pub fn get_all_states(&self) -> &HashMap<String, NamespaceState> {
         &self.namespace_states

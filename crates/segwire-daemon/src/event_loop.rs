@@ -69,7 +69,7 @@ impl DaemonEventLoop {
         log_info!(ctx, "Configuration loaded successfully");
 
         // Initialize namespace state manager FIRST
-        let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new().await?));
+        let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new_auto().await?));
         log_info!(ctx, "Namespace state manager initialized successfully");
 
         // Get configuration values for logging

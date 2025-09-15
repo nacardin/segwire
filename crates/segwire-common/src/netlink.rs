@@ -246,13 +246,39 @@ fn next_seq() -> u32 {
 // NetlinkManager
 // ---------------------------------------------------------------------------
 
+/// In-memory state for simulation mode.
+pub struct SimulatedState {
+    namespaces: HashMap<String, NamespaceInfo>,
+    next_id: u32,
+}
+
+impl SimulatedState {
+    fn new() -> Self {
+        Self {
+            namespaces: HashMap::new(),
+            next_id: 1000,
+        }
+    }
+}
+
+/// Backend selection for NetlinkManager.
+enum NetlinkBackend {
+    /// Real netlink socket for production use.
+    Real(Socket),
+    /// In-memory simulation for testing.
+    Simulated(std::cell::RefCell<SimulatedState>),
+}
+
 /// High-level interface for network namespace operations.
 ///
 /// Uses raw netlink sockets for link/route operations and nix syscalls for
 /// namespace lifecycle management.  All methods are synchronous.
+///
+/// In simulation mode (created via `new_simulated()` or `new_auto()` with
+/// `SEGWIRE_SIMULATION=1`), all operations act on an in-memory map instead
+/// of real kernel namespaces.
 pub struct NetlinkManager {
-    /// Cached netlink socket for link/route operations in the default namespace.
-    socket: Socket,
+    backend: NetlinkBackend,
 }
 
 impl NetlinkManager {
@@ -276,7 +302,42 @@ impl NetlinkManager {
             })?;
         }
 
-        Ok(Self { socket })
+        Ok(Self {
+            backend: NetlinkBackend::Real(socket),
+        })
+    }
+
+    /// Create a simulated NetlinkManager for testing.
+    ///
+    /// All namespace operations act on an in-memory map — no root required,
+    /// no real kernel namespaces are created.
+    pub fn new_simulated() -> SegwireResult<Self> {
+        info!("Creating simulated NetlinkManager (no real namespace operations)");
+        Ok(Self {
+            backend: NetlinkBackend::Simulated(std::cell::RefCell::new(SimulatedState::new())),
+        })
+    }
+
+    /// Auto-select real or simulated mode based on `SEGWIRE_SIMULATION` env var.
+    pub fn new_auto() -> SegwireResult<Self> {
+        if std::env::var("SEGWIRE_SIMULATION").is_ok() {
+            Self::new_simulated()
+        } else {
+            Self::new()
+        }
+    }
+
+    /// Returns true if running in simulation mode.
+    pub fn is_simulated(&self) -> bool {
+        matches!(self.backend, NetlinkBackend::Simulated(_))
+    }
+
+    /// Get reference to the real netlink socket (panics in simulation mode).
+    fn real_socket(&self) -> &Socket {
+        match &self.backend {
+            NetlinkBackend::Real(s) => s,
+            NetlinkBackend::Simulated(_) => panic!("BUG: real_socket() called in simulation mode"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -289,8 +350,28 @@ impl NetlinkManager {
     ///   1. Create a placeholder file under /var/run/netns/
     ///   2. In a new thread: `unshare(CLONE_NEWNET)`
     ///   3. Bind-mount the thread's `/proc/self/ns/net` onto the placeholder
+    ///
+    /// In simulation mode, adds an entry to the in-memory map.
     pub fn create_namespace(&self, name: &str) -> SegwireResult<NamespaceInfo> {
         self.validate_namespace_name(name)?;
+
+        if let NetlinkBackend::Simulated(state) = &self.backend {
+            let mut state = state.borrow_mut();
+            if state.namespaces.contains_key(name) {
+                return Err(NetlinkError::NamespaceExists(name.to_string()).into());
+            }
+            let id = state.next_id;
+            state.next_id += 1;
+            let info = NamespaceInfo {
+                name: name.to_string(),
+                id,
+                path: PathBuf::from(format!("/sim/netns/{}", name)),
+                active: true,
+            };
+            state.namespaces.insert(name.to_string(), info.clone());
+            info!("[SIM] Created namespace '{}'", name);
+            return Ok(info);
+        }
 
         let ns_path = PathBuf::from(format!("{}/{}", NETNS_RUN_DIR, name));
         if ns_path.exists() {
@@ -357,8 +438,18 @@ impl NetlinkManager {
     /// Delete a network namespace.
     ///
     /// Mirrors `ip netns delete`: unmount the bind-mount, remove the file.
+    /// In simulation mode, removes from the in-memory map.
     pub fn delete_namespace(&self, name: &str) -> SegwireResult<()> {
         self.validate_namespace_name(name)?;
+
+        if let NetlinkBackend::Simulated(state) = &self.backend {
+            let mut state = state.borrow_mut();
+            if state.namespaces.remove(name).is_none() {
+                return Err(NetlinkError::NamespaceNotFound(name.to_string()).into());
+            }
+            info!("[SIM] Deleted namespace '{}'", name);
+            return Ok(());
+        }
 
         let ns_path = PathBuf::from(format!("{}/{}", NETNS_RUN_DIR, name));
         if !ns_path.exists() {
@@ -381,13 +472,21 @@ impl NetlinkManager {
 
     /// Check if a namespace exists.
     pub fn namespace_exists(&self, name: &str) -> SegwireResult<bool> {
+        if let NetlinkBackend::Simulated(state) = &self.backend {
+            return Ok(state.borrow().namespaces.contains_key(name));
+        }
         Ok(PathBuf::from(format!("{}/{}", NETNS_RUN_DIR, name)).exists())
     }
 
     /// List all named network namespaces.
     ///
     /// Reads `/var/run/netns/` directory entries.
+    /// In simulation mode, returns the in-memory map.
     pub fn list_namespaces(&self) -> SegwireResult<HashMap<String, NamespaceInfo>> {
+        if let NetlinkBackend::Simulated(state) = &self.backend {
+            return Ok(state.borrow().namespaces.clone());
+        }
+
         let mut map = HashMap::new();
         let netns_dir = Path::new(NETNS_RUN_DIR);
         if !netns_dir.exists() {
@@ -432,6 +531,10 @@ impl NetlinkManager {
 
     /// List all network interfaces in the default namespace.
     pub fn list_interfaces(&self) -> SegwireResult<Vec<String>> {
+        if self.is_simulated() {
+            return Ok(vec!["lo".to_string(), "eth0".to_string()]);
+        }
+
         let mut msg = LinkMessage::default();
         // AF_UNSPEC = 0 — list all families
         msg.header.interface_family = 0;
@@ -441,7 +544,7 @@ impl NetlinkManager {
         nl_msg.header.sequence_number = next_seq();
         nl_msg.finalize();
 
-        let responses = netlink_request(&self.socket, nl_msg)?;
+        let responses = netlink_request(self.real_socket(), nl_msg)?;
 
         let mut names = Vec::new();
         for resp in responses {
@@ -474,6 +577,10 @@ impl NetlinkManager {
 
     /// Get the kernel interface index for a given name.
     fn get_interface_index(&self, interface_name: &str) -> SegwireResult<u32> {
+        if self.is_simulated() {
+            return Ok(1); // simulated index
+        }
+
         let mut msg = LinkMessage::default();
         msg.header.interface_family = 0;
 
@@ -482,7 +589,7 @@ impl NetlinkManager {
         nl_msg.header.sequence_number = next_seq();
         nl_msg.finalize();
 
-        let responses = netlink_request(&self.socket, nl_msg)?;
+        let responses = netlink_request(self.real_socket(), nl_msg)?;
 
         for resp in responses {
             if let NetlinkPayload::InnerMessage(RtnlMessage::NewLink(link)) = resp.payload {
@@ -501,6 +608,9 @@ impl NetlinkManager {
 
     /// List network interfaces inside a specific namespace.
     pub fn list_namespace_interfaces(&self, namespace_name: &str) -> SegwireResult<Vec<String>> {
+        if self.is_simulated() {
+            return Ok(vec!["lo".to_string()]);
+        }
         self.validate_namespace_name(namespace_name)?;
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
@@ -543,6 +653,13 @@ impl NetlinkManager {
         interface_name: &str,
         namespace_name: &str,
     ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Moved interface '{}' to namespace '{}'",
+                interface_name, namespace_name
+            );
+            return Ok(());
+        }
         self.validate_namespace_name(namespace_name)?;
         self.validate_interface_name(interface_name)?;
 
@@ -583,7 +700,7 @@ impl NetlinkManager {
             nl_msg.header.sequence_number = next_seq();
             nl_msg.finalize();
 
-            netlink_request(&self.socket, nl_msg)?;
+            netlink_request(self.real_socket(), nl_msg)?;
             Ok(())
         })();
 
@@ -611,6 +728,13 @@ impl NetlinkManager {
         namespace_name: &str,
         interface_name: &str,
     ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Moved interface '{}' from namespace '{}' to default",
+                interface_name, namespace_name
+            );
+            return Ok(());
+        }
         self.validate_namespace_name(namespace_name)?;
         self.validate_interface_name(interface_name)?;
 
@@ -675,6 +799,10 @@ impl NetlinkManager {
     ///
     /// Uses `RTM_NEWLINK` with `IFLA_LINKINFO` kind="veth".
     pub fn create_veth_pair(&self, veth_name: &str, peer_name: &str) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!("[SIM] Created veth pair '{}'<->'{}'", veth_name, peer_name);
+            return Ok(());
+        }
         self.validate_interface_name(veth_name)?;
         self.validate_interface_name(peer_name)?;
 
@@ -710,7 +838,7 @@ impl NetlinkManager {
         nl_msg.header.sequence_number = next_seq();
         nl_msg.finalize();
 
-        netlink_request(&self.socket, nl_msg).map_err(|e| {
+        netlink_request(self.real_socket(), nl_msg).map_err(|e| {
             NetlinkError::VirtualInterfaceCreateFailed(veth_name.to_string(), e.to_string())
         })?;
 
@@ -728,10 +856,11 @@ impl NetlinkManager {
         namespace_name: &str,
         routes: &[RouteConfig],
     ) -> SegwireResult<()> {
-        self.validate_namespace_name(namespace_name)?;
-        if !self.namespace_exists(namespace_name)? {
-            return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
+        if self.is_simulated() {
+            info!("[SIM] Configured routes for namespace '{}'", namespace_name);
+            return Ok(());
         }
+        self.validate_namespace_name(namespace_name)?;
 
         for route in routes {
             self.add_route_to_namespace(namespace_name, route)?;
@@ -745,6 +874,9 @@ impl NetlinkManager {
         namespace_name: &str,
         route: &RouteConfig,
     ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            return Ok(());
+        }
         self.validate_route_config(route)?;
 
         let ns_name = namespace_name.to_string();
@@ -820,6 +952,9 @@ impl NetlinkManager {
 
     /// List routes inside a namespace.
     pub fn list_namespace_routes(&self, namespace_name: &str) -> SegwireResult<Vec<String>> {
+        if self.is_simulated() {
+            return Ok(Vec::new());
+        }
         self.validate_namespace_name(namespace_name)?;
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
@@ -865,6 +1000,10 @@ impl NetlinkManager {
         namespace_name: &str,
         dns_config: &DnsConfig,
     ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!("[SIM] Configured DNS for namespace '{}'", namespace_name);
+            return Ok(());
+        }
         self.validate_namespace_name(namespace_name)?;
         self.validate_dns_config(dns_config)?;
 
@@ -918,6 +1057,13 @@ impl NetlinkManager {
 
     /// Get DNS configuration from a namespace.
     pub fn get_namespace_dns_config(&self, namespace_name: &str) -> SegwireResult<DnsConfig> {
+        if self.is_simulated() {
+            return Ok(DnsConfig {
+                servers: Vec::new(),
+                search_domains: Vec::new(),
+                options: Vec::new(),
+            });
+        }
         self.validate_namespace_name(namespace_name)?;
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
@@ -950,6 +1096,16 @@ impl NetlinkManager {
     /// Get information about a specific namespace.
     pub fn get_namespace_info(&self, name: &str) -> SegwireResult<NamespaceInfo> {
         self.validate_namespace_name(name)?;
+
+        if let NetlinkBackend::Simulated(state) = &self.backend {
+            let state = state.borrow();
+            return state
+                .namespaces
+                .get(name)
+                .cloned()
+                .ok_or_else(|| NetlinkError::NamespaceNotFound(name.to_string()).into());
+        }
+
         let ns_path = PathBuf::from(format!("{}/{}", NETNS_RUN_DIR, name));
         if !ns_path.exists() {
             return Err(NetlinkError::NamespaceNotFound(name.to_string()).into());
@@ -1182,12 +1338,7 @@ mod tests {
 
     #[test]
     fn test_validate_namespace_name() {
-        let _mgr_result = NetlinkManager {
-            socket: open_netlink_socket().unwrap_or_else(|_| {
-                // Tests may run without privileges; create a dummy for validation tests
-                panic!("Need root for this test");
-            }),
-        };
+        let _mgr_result = NetlinkManager::new_simulated().unwrap();
         // Only run validation tests that don't need a real socket
     }
 

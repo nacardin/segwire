@@ -40,38 +40,42 @@ impl DbusService {
         log_info!(ctx, "Initializing D-Bus service");
 
         // Build D-Bus connection with service registration
-        let connection = ConnectionBuilder::system()
-            .map_err(|e| {
-                let error_ctx = ErrorContext::new("dbus_connection_builder")
-                    .with_field("service_name", interface::SERVICE_NAME)
-                    .with_remediation("Ensure D-Bus system bus is available")
-                    .with_remediation(
-                        "Check that the daemon has permission to access the system bus",
-                    );
-                SegwireError::DBus(e)
-                    .with_context(error_ctx)
-                    .log_and_return()
-            })?
-            .name(interface::SERVICE_NAME)
-            .map_err(|e| {
-                let error_ctx = ErrorContext::new("dbus_service_name_registration")
-                    .with_field("service_name", interface::SERVICE_NAME)
-                    .with_remediation("Ensure no other instance of segwire-daemon is running")
-                    .with_remediation("Check D-Bus service configuration");
-                SegwireError::DBus(e)
-                    .with_context(error_ctx)
-                    .log_and_return()
-            })?
-            .build()
-            .await
-            .map_err(|e| {
-                let error_ctx = ErrorContext::new("dbus_connection_build")
-                    .with_remediation("Ensure D-Bus system bus is running")
-                    .with_remediation("Check system D-Bus configuration");
-                SegwireError::DBus(e)
-                    .with_context(error_ctx)
-                    .log_and_return()
-            })?;
+        // In simulation mode, use the session bus for unprivileged testing
+        let connection = if std::env::var("SEGWIRE_SIMULATION").is_ok() {
+            log_info!(ctx, "Using session D-Bus (simulation mode)");
+            ConnectionBuilder::session()
+        } else {
+            ConnectionBuilder::system()
+        }
+        .map_err(|e| {
+            let error_ctx = ErrorContext::new("dbus_connection_builder")
+                .with_field("service_name", interface::SERVICE_NAME)
+                .with_remediation("Ensure D-Bus system bus is available")
+                .with_remediation("Check that the daemon has permission to access the system bus");
+            SegwireError::DBus(e)
+                .with_context(error_ctx)
+                .log_and_return()
+        })?
+        .name(interface::SERVICE_NAME)
+        .map_err(|e| {
+            let error_ctx = ErrorContext::new("dbus_service_name_registration")
+                .with_field("service_name", interface::SERVICE_NAME)
+                .with_remediation("Ensure no other instance of segwire-daemon is running")
+                .with_remediation("Check D-Bus service configuration");
+            SegwireError::DBus(e)
+                .with_context(error_ctx)
+                .log_and_return()
+        })?
+        .build()
+        .await
+        .map_err(|e| {
+            let error_ctx = ErrorContext::new("dbus_connection_build")
+                .with_remediation("Ensure D-Bus system bus is running")
+                .with_remediation("Check system D-Bus configuration");
+            SegwireError::DBus(e)
+                .with_context(error_ctx)
+                .log_and_return()
+        })?;
 
         let authorizer = crate::policykit::PolicyKitAuthorizer::new(connection.clone());
 

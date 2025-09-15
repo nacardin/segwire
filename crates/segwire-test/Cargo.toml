@@ -1,0 +1,30 @@
+[package]
+name = "segwire-test"
+version = "0.1.0"
+edition = "2021"
+description = "Integration tests for segwire — starts daemon in simulation mode with session D-Bus"
+
+[dependencies]
+# Internal crates
+segwire-daemon = { path = "../segwire-daemon" }
+segwire-cli = { path = "../segwire-cli" }
+segwire-common = { path = "../segwire-common" }
+
+# D-Bus
+zbus = { workspace = true }
+
+# Async runtime (same as daemon)
+monoio = { workspace = true }
+
+# Test utilities
+tempfile = "3.8"
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Test serialization (daemon tests share a D-Bus name)
+serial_test = "3"

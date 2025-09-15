@@ -6,7 +6,7 @@
   - Set up basic error types and common utilities
   - _Requirements: 2.1, 2.2, 6.1_
 
-- [ ] 2. Implement core configuration types and parsing
+- [x] 2. Implement core configuration types and parsing
   - [x] 2.1 Create TOML configuration structures in segwire-common
     - Define master daemon configuration structure
     - Define namespace configuration structure with all fields
@@ -95,7 +95,7 @@
     - Create progress signal emission for long operations
     - _Requirements: 4.3, 4.6, 6.4_
 
-- [ ] 7. Create daemon main event loop and coordination
+- [x] 7. Create daemon main event loop and coordination
   - [x] 7.1 Implement monoio-based event loop
     - Set up monoio runtime with io_uring support
     - Create task coordination between configuration monitoring and D-Bus service
@@ -113,7 +113,7 @@
     - Implement detailed error reporting with context
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6_
 
-- [ ] 8. Build CLI D-Bus client implementation
+- [x] 8. Build CLI D-Bus client implementation
   - [x] 8.1 Create D-Bus client connection and discovery
     - Implement connection to daemon's D-Bus service
     - Add service discovery and availability checking
@@ -132,7 +132,7 @@
     - Create progress display for long-running operations
     - _Requirements: 3.1, 3.2, 3.3, 3.6_
 
-- [ ] 9. Implement privilege checking and security
+- [x] 9. Implement privilege checking and security
   - [x] 9.1 Add capability checking in daemon
     - Implement CAP_SYS_ADMIN capability verification
     - Add runtime privilege checking with clear error messages
@@ -151,27 +151,27 @@
     - Create path traversal protection for configuration paths
     - _Requirements: 7.2_
 
-- [ ] 10. Create comprehensive test suite
+- [x] 10. Create comprehensive test suite
   - [x] 10.1 Write unit tests for shared crate
     - Test configuration parsing and validation logic
     - Test D-Bus type serialization and deserialization
     - Test error handling and utility functions
     - _Requirements: 2.1, 2.7, 6.6_
 
-  - [ ] 10.2 Write daemon component tests
+  - [x] 10.2 Write daemon component tests
     - Test configuration monitoring and file watching
     - Test namespace management operations with mocks
     - Test D-Bus service methods and signal emission
     - _Requirements: 1.1, 1.2, 1.3, 6.1, 6.2_
 
-  - [ ] 10.3 Write CLI component tests
+  - [x] 10.3 Write CLI component tests
     - Test command parsing and validation
     - Test D-Bus client communication with mock daemon
     - Test output formatting for different data types
     - _Requirements: 3.1, 3.2, 6.2, 6.5_
 
 - [ ] 11. Add integration testing and system validation
-  - [ ] 11.1 Create end-to-end workflow tests
+  - [x] 11.1 Create end-to-end workflow tests
     - Test complete daemon startup and configuration loading
     - Test CLI commands against running daemon instance
     - Test configuration file changes and automatic updates

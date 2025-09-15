@@ -3,6 +3,7 @@ members = [
     "crates/segwire-daemon",
     "crates/segwire-cli",
     "crates/segwire-common",
+    "crates/segwire-test",
 ]
 resolver = "2"
 
