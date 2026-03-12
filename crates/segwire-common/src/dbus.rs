@@ -34,7 +34,7 @@ pub struct NamespaceState {
 }
 
 /// Namespace status enumeration
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum NamespaceStatus {
     Creating,
     Active,
@@ -126,17 +126,23 @@ impl NamespaceState {
 
     /// Check if the namespace is in an active state
     pub fn is_active(&self) -> bool {
-        self.status == "active"
+        self.parsed_status() == NamespaceStatus::Active
     }
 
     /// Check if the namespace is in a failed state
     pub fn is_failed(&self) -> bool {
-        self.status.starts_with("failed")
+        self.parsed_status() == NamespaceStatus::Failed
+    }
+
+    /// Parse the status string into a NamespaceStatus enum.
+    /// Returns `Failed` for unrecognised strings (including "failed: ...").
+    pub fn parsed_status(&self) -> NamespaceStatus {
+        self.status.parse().unwrap_or(NamespaceStatus::Failed)
     }
 
     /// Set the status with a NamespaceStatus enum
     pub fn set_status(&mut self, status: NamespaceStatus) {
-        self.status = status.as_str().to_string();
+        self.status = status.to_string();
         self.touch();
     }
 }
@@ -155,6 +161,26 @@ impl NamespaceStatus {
     /// Check if the status indicates an error condition
     pub fn is_error(&self) -> bool {
         matches!(self, NamespaceStatus::Failed)
+    }
+}
+
+impl std::fmt::Display for NamespaceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for NamespaceStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "creating" => Ok(NamespaceStatus::Creating),
+            "active" => Ok(NamespaceStatus::Active),
+            "failed" => Ok(NamespaceStatus::Failed),
+            "deleting" => Ok(NamespaceStatus::Deleting),
+            _ => Err(format!("unknown namespace status: {}", s)),
+        }
     }
 }
 
@@ -951,6 +977,7 @@ mod tests {
         assert_eq!(state.name, "test-ns");
         assert_eq!(state.full_name, "segwire-test-ns");
         assert_eq!(state.status, "creating");
+        assert_eq!(state.parsed_status(), NamespaceStatus::Creating);
         assert_eq!(state.config_path, "/etc/segwire/test.toml");
         assert!(state.interfaces.is_empty());
         assert!(state.routes.is_empty());

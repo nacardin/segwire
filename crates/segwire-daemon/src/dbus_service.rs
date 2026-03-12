@@ -555,12 +555,58 @@ impl NamespaceManagerInterface {
             return Err(create_fdo_error(e));
         }
 
-        // TODO: Implement actual namespace restart logic
-        // For now, return a placeholder implementation
-        warn!("RestartNamespace not fully implemented yet");
-        Ok(OperationResult::failure(
-            "RestartNamespace method not yet implemented".to_string(),
-        ))
+        // Look up the namespace configuration before deleting
+        let config = {
+            let config_mgr = self.config_manager.lock().await;
+            let full_name = config_mgr.generate_full_namespace_name(&name);
+            config_mgr
+                .get_namespace_config(&full_name)
+                .or_else(|| config_mgr.get_namespace_config(&name))
+                .map(|entry| entry.config.clone())
+        };
+
+        let config = match config {
+            Some(c) => c,
+            None => {
+                return Ok(OperationResult::failure(format!(
+                    "No configuration found for namespace '{}', cannot restart",
+                    name
+                )));
+            }
+        };
+
+        // Delete the existing namespace
+        if let Err(e) = self.delete_namespace_by_name(&name).await {
+            warn!(
+                "Failed to delete namespace '{}' during restart: {:?}",
+                name, e
+            );
+            return Ok(OperationResult::failure(format!(
+                "Restart failed during deletion: {}",
+                e
+            )));
+        }
+
+        // Recreate from config
+        match self.create_namespace_from_config(config).await {
+            Ok(full_name) => {
+                info!("Successfully restarted namespace '{}'", full_name);
+                Ok(OperationResult::success(format!(
+                    "Namespace '{}' restarted successfully",
+                    full_name
+                )))
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to recreate namespace '{}' during restart: {:?}",
+                    name, e
+                );
+                Ok(OperationResult::failure(format!(
+                    "Restart failed during recreation: {}",
+                    e
+                )))
+            }
+        }
     }
 
     /// D-Bus signal definitions
@@ -666,11 +712,20 @@ impl NamespaceManagerInterface {
         let netlink_manager = NetlinkManager::new()?;
         netlink_manager.create_namespace(&full_name)?;
 
+        // Look up the config path from the config manager
+        let config_path = {
+            let config_mgr = self.config_manager.lock().await;
+            config_mgr
+                .get_namespace_config(&full_name)
+                .map(|entry| entry.file_path.clone())
+                .unwrap_or_default()
+        };
+
         // Create namespace state for tracking
         let namespace_state = NamespaceState::new(
             config.namespace.name.clone(),
             full_name.clone(),
-            std::path::PathBuf::from(""), // Will be set properly when integrated with config manager
+            config_path,
         );
 
         // Add to managed namespaces
@@ -962,22 +1017,22 @@ impl NamespaceManagerInterface {
         progress: f64,
         message: &str,
     ) -> Result<(), SegwireError> {
-        // This would normally emit a D-Bus signal, but for now we'll just log
         debug!(
             "Progress: {} - {:.1}% - {}",
             operation,
             progress * 100.0,
             message
         );
-        // TODO: Emit actual D-Bus signal when signal emission is properly implemented
-        /*
-        NamespaceManagerInterface::operation_progress(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            operation,
-            progress,
-            message,
-        ).await?;
-        */
+
+        let signal_ctx = SignalContext::new(&self.connection, interface::OBJECT_PATH)
+            .map_err(SegwireError::DBus)?;
+
+        if let Err(e) =
+            NamespaceManagerInterface::operation_progress(&signal_ctx, operation, progress, message)
+                .await
+        {
+            warn!("Failed to emit OperationProgress signal: {}", e);
+        }
 
         Ok(())
     }

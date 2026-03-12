@@ -122,7 +122,13 @@ impl PolicyKitAuthorizer {
         Ok(ProcessInfo { pid, uid })
     }
 
-    /// Call PolicyKit to check authorization
+    /// Call PolicyKit to check authorization.
+    ///
+    /// Uses the `org.freedesktop.PolicyKit1.Authority.CheckAuthorization`
+    /// D-Bus method with a `unix-process` subject built from the caller's
+    /// PID and start-time.  If the PolicyKit daemon is not reachable we
+    /// fall back to a simple UID==0 check so that the daemon still works
+    /// on systems without PolicyKit installed.
     async fn call_policykit_check_authorization(
         &self,
         process_info: &ProcessInfo,
@@ -133,14 +139,93 @@ impl PolicyKitAuthorizer {
             process_info.pid, process_info.uid, action_id
         );
 
-        // TODO: Implement actual PolicyKit D-Bus call
-        // This would involve calling:
-        // org.freedesktop.PolicyKit1.Authority.CheckAuthorization
-        // with the appropriate parameters
+        // Try to build a proxy for the PolicyKit Authority
+        let pk_proxy = match zbus::Proxy::new(
+            &self._connection,
+            "org.freedesktop.PolicyKit1",
+            "/org/freedesktop/PolicyKit1/Authority",
+            "org.freedesktop.PolicyKit1.Authority",
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    "PolicyKit Authority proxy creation failed ({}), falling back to UID check",
+                    e
+                );
+                return Ok(self.uid_fallback(process_info));
+            }
+        };
 
-        // For now, return a placeholder result
-        warn!("PolicyKit integration not fully implemented - allowing operation");
-        Ok(AuthorizationResult::Authorized)
+        // Build the "subject" struct:
+        //   (sa{sv})  →  ("unix-process", { "pid" => u32, "start-time" => u64 })
+        // start-time 0 tells polkit to look it up itself.
+        let subject_kind = "unix-process";
+        let pid_variant = zvariant::Value::U32(process_info.pid);
+        let start_time_variant = zvariant::Value::U64(0u64);
+        let subject_details: HashMap<&str, zvariant::Value<'_>> =
+            HashMap::from([("pid", pid_variant), ("start-time", start_time_variant)]);
+
+        let details: HashMap<&str, &str> = HashMap::new();
+        let flags: u32 = 0; // 0 = do not allow interactive auth
+
+        // Call CheckAuthorization(subject, action_id, details, flags, cancellation_id)
+        let reply = pk_proxy
+            .call_method(
+                "CheckAuthorization",
+                &(
+                    (subject_kind, &subject_details),
+                    action_id,
+                    &details,
+                    flags,
+                    "", // cancellation_id
+                ),
+            )
+            .await;
+
+        match reply {
+            Ok(msg) => {
+                // PolicyKit returns (bba{ss}) → (is_authorized, is_challenge, details)
+                match msg.body::<(bool, bool, HashMap<String, String>)>() {
+                    Ok((is_authorized, is_challenge, _details)) => {
+                        if is_authorized {
+                            Ok(AuthorizationResult::Authorized)
+                        } else if is_challenge {
+                            Ok(AuthorizationResult::AuthenticationRequired)
+                        } else {
+                            Ok(AuthorizationResult::NotAuthorized)
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse PolicyKit response: {}", e);
+                        Ok(self.uid_fallback(process_info))
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "PolicyKit CheckAuthorization call failed ({}), falling back to UID check",
+                    e
+                );
+                Ok(self.uid_fallback(process_info))
+            }
+        }
+    }
+
+    /// Simple UID-based fallback when PolicyKit is not available.
+    /// Only UID 0 (root) is authorized.
+    fn uid_fallback(&self, process_info: &ProcessInfo) -> AuthorizationResult {
+        if process_info.uid == 0 {
+            debug!("UID fallback: root user authorized");
+            AuthorizationResult::Authorized
+        } else {
+            warn!(
+                "UID fallback: non-root UID {} denied (PolicyKit unavailable)",
+                process_info.uid
+            );
+            AuthorizationResult::NotAuthorized
+        }
     }
 }
 

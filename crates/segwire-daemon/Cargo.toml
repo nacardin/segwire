@@ -10,6 +10,7 @@ segwire-common = { workspace = true }
 
 # D-Bus communication
 zbus = { workspace = true }
+zvariant = { workspace = true }
 
 # Network namespace management
 nix = { workspace = true }

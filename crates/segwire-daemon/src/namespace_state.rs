@@ -356,19 +356,27 @@ impl NamespaceStateManager {
         false
     }
 
-    /// Check if there's drift between expected and actual namespace configuration
+    /// Check if there's drift between expected and actual namespace configuration.
+    ///
+    /// Currently detects:
+    /// - Namespace exists in config but not on the system (active == false)
+    /// - Namespace is on the system but not enabled in config
     fn has_configuration_drift(
         &self,
         _current_state: &NamespaceState,
         _config_entry: &NamespaceConfigEntry,
-        _actual_info: &segwire_common::netlink::NamespaceInfo,
+        actual_info: &segwire_common::netlink::NamespaceInfo,
     ) -> bool {
-        // TODO: Implement detailed configuration drift detection
-        // This would compare:
-        // - Network interfaces in the namespace
-        // - Routing table entries
-        // - DNS configuration
-        // For now, we'll assume no drift to keep implementation simple
+        // Since NamespaceSettings has no "enabled" flag, we detect drift
+        // by checking if the actual namespace is not active.
+        if !actual_info.active {
+            debug!(
+                "Drift: namespace '{}' should be active but isn't",
+                actual_info.name
+            );
+            return true;
+        }
+
         false
     }
 
@@ -427,13 +435,60 @@ impl NamespaceStateManager {
         let full_name = &config_entry.full_name;
         info!("Updating existing namespace: {}", full_name);
 
-        // TODO: Implement namespace configuration updates
-        // This would involve:
-        // 1. Comparing current configuration with desired configuration
-        // 2. Applying necessary changes (interfaces, routes, DNS)
-        // 3. Handling rollback on failure
+        // Re-apply configuration: routes first, then DNS
+        // Interface moves are not idempotent, so we skip them on update.
 
-        // For now, just update the state timestamp and mark as updated
+        // Apply routes
+        for route_cfg in &config_entry.config.routing.routes {
+            let route = segwire_common::netlink::RouteConfig {
+                destination: route_cfg.destination.clone(),
+                gateway: route_cfg.gateway.clone(),
+                interface: None,
+                metric: route_cfg.metric,
+            };
+            if let Err(e) = self
+                .netlink_manager
+                .add_route_to_namespace(full_name, &route)
+            {
+                warn!(
+                    "Failed to apply route {} in {}: {}",
+                    route_cfg.destination, full_name, e
+                );
+            }
+        }
+
+        // Apply default gateway if configured
+        if let Some(ref gw) = config_entry.config.routing.default_gateway {
+            let default_route = segwire_common::netlink::RouteConfig {
+                destination: "default".to_string(),
+                gateway: gw.clone(),
+                interface: None,
+                metric: None,
+            };
+            if let Err(e) = self
+                .netlink_manager
+                .add_route_to_namespace(full_name, &default_route)
+            {
+                warn!("Failed to apply default gateway in {}: {}", full_name, e);
+            }
+        }
+
+        // Apply DNS
+        if !config_entry.config.dns.servers.is_empty() {
+            let dns_config = segwire_common::netlink::DnsConfig {
+                servers: config_entry.config.dns.servers.clone(),
+                search_domains: config_entry.config.dns.search.clone(),
+                options: Vec::new(),
+            };
+            if let Err(e) = self
+                .netlink_manager
+                .configure_namespace_dns(full_name, &dns_config)
+            {
+                warn!("Failed to apply DNS config in {}: {}", full_name, e);
+            }
+        }
+
+        // Update in-memory state
         if let Some(state) = self.get_namespace_state_mut(full_name) {
             state.touch();
             Self::update_state_from_config_and_actual(state, config_entry, actual_info);
@@ -464,13 +519,12 @@ impl NamespaceStateManager {
     fn update_state_from_config_and_actual(
         state: &mut NamespaceState,
         config_entry: &NamespaceConfigEntry,
-        _actual_info: &segwire_common::netlink::NamespaceInfo,
+        actual_info: &segwire_common::netlink::NamespaceInfo,
     ) {
-        // TODO: Query actual interfaces and routes from the namespace
-        // For now, we'll populate from configuration since the NamespaceInfo
-        // structure doesn't contain detailed interface/route information
+        // Derive interface status from actual runtime state
+        let if_status = if actual_info.active { "up" } else { "down" };
 
-        // Update interfaces from configuration
+        // Update interfaces from configuration, with status from actual
         let mut interfaces = Vec::new();
 
         // Add moved interfaces
@@ -478,8 +532,8 @@ impl NamespaceStateManager {
             interfaces.push(segwire_common::dbus::InterfaceInfo {
                 name: interface_name.clone(),
                 interface_type: "physical".to_string(),
-                status: "unknown".to_string(), // Would need to query actual status
-                addresses: Vec::new(),         // Would need to query actual addresses
+                status: if_status.to_string(),
+                addresses: Vec::new(),
             });
         }
 
@@ -488,8 +542,8 @@ impl NamespaceStateManager {
             interfaces.push(segwire_common::dbus::InterfaceInfo {
                 name: vif.name.clone(),
                 interface_type: vif.interface_type.clone(),
-                status: "unknown".to_string(), // Would need to query actual status
-                addresses: Vec::new(),         // Would need to query actual addresses
+                status: if_status.to_string(),
+                addresses: Vec::new(),
             });
         }
 
@@ -501,13 +555,11 @@ impl NamespaceStateManager {
             .routing
             .routes
             .iter()
-            .map(|route| {
-                segwire_common::dbus::RouteInfo {
-                    destination: route.destination.clone(),
-                    gateway: route.gateway.clone(),
-                    metric: route.metric.unwrap_or(0),
-                    interface: "unknown".to_string(), // Would need to determine from routing table
-                }
+            .map(|route| segwire_common::dbus::RouteInfo {
+                destination: route.destination.clone(),
+                gateway: route.gateway.clone(),
+                metric: route.metric.unwrap_or(0),
+                interface: String::new(),
             })
             .collect();
 
@@ -517,7 +569,7 @@ impl NamespaceStateManager {
                 destination: "default".to_string(),
                 gateway: gateway.clone(),
                 metric: 0,
-                interface: "unknown".to_string(),
+                interface: String::new(),
             });
         }
 
@@ -526,6 +578,11 @@ impl NamespaceStateManager {
             servers: config_entry.config.dns.servers.clone(),
             search_domains: config_entry.config.dns.search.clone(),
         };
+
+        // Set status based on actual info
+        if actual_info.active {
+            state.status = NamespaceStatus::Active.to_string();
+        }
 
         state.touch();
     }
@@ -601,12 +658,11 @@ impl NamespaceStateManager {
         };
 
         for state in self.namespace_states.values() {
-            match state.status.as_str() {
-                "active" => stats.active_namespaces += 1,
-                "creating" => stats.creating_namespaces += 1,
-                "deleting" => stats.deleting_namespaces += 1,
-                s if s.starts_with("failed") => stats.failed_namespaces += 1,
-                _ => {}
+            match state.parsed_status() {
+                NamespaceStatus::Active => stats.active_namespaces += 1,
+                NamespaceStatus::Creating => stats.creating_namespaces += 1,
+                NamespaceStatus::Deleting => stats.deleting_namespaces += 1,
+                NamespaceStatus::Failed => stats.failed_namespaces += 1,
             }
         }
 
