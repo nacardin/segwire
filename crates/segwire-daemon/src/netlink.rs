@@ -372,6 +372,48 @@ impl NetlinkManager {
         })
     }
 
+    /// Create a generic virtual interface (dummy, bridge, macvlan, ipvlan) inside a namespace.
+    pub fn create_virtual_interface(
+        &self,
+        namespace_name: &str,
+        vif_name: &str,
+        vif_type: &str,
+    ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Created virtual interface '{}' of type '{}' in namespace '{}'",
+                vif_name, vif_type, namespace_name
+            );
+            return Ok(());
+        }
+        segwire_common::utils::validate_namespace_name(namespace_name)?;
+        segwire_common::utils::validate_interface_name(vif_name)?;
+
+        if !self.namespace_exists(namespace_name)? {
+            return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
+        }
+
+        let ns_interfaces = self.list_namespace_interfaces(namespace_name)?;
+        if ns_interfaces.iter().any(|n| n == vif_name) {
+            return Err(NetlinkError::VirtualInterfaceCreateFailed(
+                vif_name.to_string(),
+                "Interface already exists in namespace".to_string(),
+            )
+            .into());
+        }
+
+        let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
+        let vif_name_clone = vif_name.to_string();
+        let vif_type_clone = vif_type.to_string();
+
+        let result = netns_raw::run_in_namespace(&ns_path, move || {
+            netlink_raw::create_virtual_interface_sync(&vif_name_clone, &vif_type_clone)
+        })
+        .map_err(SegwireError::Network)?;
+
+        result.map_err(|e| e.into())
+    }
+
     /// Create a virtual ethernet (veth) pair.
     pub fn create_veth_pair(&self, veth_name: &str, peer_name: &str) -> SegwireResult<()> {
         if self.is_simulated() {

@@ -210,6 +210,33 @@ pub(crate) fn create_veth_pair_sync(veth_name: &str, peer_name: &str) -> Result<
     Ok(())
 }
 
+/// Create a generic virtual interface (dummy, bridge, macvlan, ipvlan) (sync).
+pub(crate) fn create_virtual_interface_sync(
+    name: &str,
+    kind_str: &str,
+) -> Result<(), NetlinkError> {
+    let kind = match kind_str {
+        "dummy" => InfoKind::Dummy,
+        "bridge" => InfoKind::Bridge,
+        "macvlan" => InfoKind::MacVlan,
+        "ipvlan" => InfoKind::IpVlan,
+        _ => return Err(NetlinkError::ProtocolError(format!("unsupported virtual interface type: {}", kind_str))),
+    };
+
+    let mut msg = LinkMessage::default();
+    msg.attributes.push(LinkAttribute::IfName(name.to_string()));
+    msg.attributes.push(LinkAttribute::LinkInfo(vec![
+        LinkInfo::Kind(kind),
+    ]));
+
+    let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+    nl_msg.finalize();
+
+    sync_netlink_request(nl_msg)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Route operations — sync (always run inside namespace thread closures)
 // ---------------------------------------------------------------------------

@@ -402,6 +402,89 @@ impl NamespaceStateManager {
             Ok(namespace_info) => {
                 info!("Successfully created namespace: {}", full_name);
 
+                // Apply virtual interfaces
+                for vif in &config_entry.config.interfaces.virtual_interfaces {
+                    match vif.interface_type.as_str() {
+                        "veth" => {
+                            if let Some(ref peer) = vif.peer {
+                                if let Err(e) = self.netlink_manager.create_veth_pair(&vif.name, peer) {
+                                    warn!("Failed to create veth pair {} <-> {}: {}", vif.name, peer, e);
+                                } else {
+                                    if let Err(e) = self.netlink_manager.move_interface_to_namespace(&vif.name, full_name) {
+                                        warn!("Failed to move veth {} into {}: {}", vif.name, full_name, e);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // Create dummy, bridge, macvlan, ipvlan inside the namespace
+                            if let Err(e) = self.netlink_manager.create_virtual_interface(full_name, &vif.name, &vif.interface_type) {
+                                warn!(
+                                    "Failed to create virtual interface {} type {} in {}: {}",
+                                    vif.name, vif.interface_type, full_name, e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Apply physical interfaces (move)
+                for iface in &config_entry.config.interfaces.move_interfaces {
+                    if let Err(e) = self.netlink_manager.move_interface_to_namespace(iface, full_name) {
+                        warn!("Failed to move interface {} into {}: {}", iface, full_name, e);
+                    }
+                }
+
+                // Apply routes
+                for route_cfg in &config_entry.config.routing.routes {
+                    let route = segwire_common::netlink::RouteConfig {
+                        destination: route_cfg.destination.clone(),
+                        gateway: route_cfg.gateway.clone(),
+                        interface: None,
+                        metric: route_cfg.metric,
+                    };
+                    if let Err(e) = self
+                        .netlink_manager
+                        .add_route_to_namespace(full_name, &route)
+                    {
+                        warn!(
+                            "Failed to apply route {} in {}: {}",
+                            route_cfg.destination, full_name, e
+                        );
+                    }
+                }
+
+                // Apply default gateway if configured
+                if let Some(ref gw) = config_entry.config.routing.default_gateway {
+                    let default_route = segwire_common::netlink::RouteConfig {
+                        destination: "default".to_string(),
+                        gateway: gw.clone(),
+                        interface: None,
+                        metric: None,
+                    };
+                    if let Err(e) = self
+                        .netlink_manager
+                        .add_route_to_namespace(full_name, &default_route)
+                    {
+                        warn!("Failed to apply default gateway in {}: {}", full_name, e);
+                    }
+                }
+
+                // Apply DNS
+                if !config_entry.config.dns.servers.is_empty() {
+                    let dns_config = segwire_common::netlink::DnsConfig {
+                        servers: config_entry.config.dns.servers.clone(),
+                        search_domains: config_entry.config.dns.search.clone(),
+                        options: Vec::new(),
+                    };
+                    if let Err(e) = self
+                        .netlink_manager
+                        .configure_namespace_dns(full_name, &dns_config)
+                    {
+                        warn!("Failed to apply DNS config in {}: {}", full_name, e);
+                    }
+                }
+
                 // Update state with successful creation
                 if let Some(state) = self.get_namespace_state_mut(full_name) {
                     state.set_status(NamespaceStatus::Active);
