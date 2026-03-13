@@ -6,22 +6,20 @@
 
 use segwire_daemon::config::{ConfigFileEvent, ConfigFileWatcher};
 use std::fs;
+use std::sync::mpsc;
 use std::time::Duration;
 use tempfile::TempDir;
 
 /// Helper: drain all available events from the channel, retrying with short
 /// sleeps up to `timeout`. Returns the collected events.
-async fn collect_events(
-    rx: &mut local_sync::mpsc::unbounded::Rx<ConfigFileEvent>,
-    timeout: Duration,
-) -> Vec<ConfigFileEvent> {
+fn collect_events(rx: &mpsc::Receiver<ConfigFileEvent>, timeout: Duration) -> Vec<ConfigFileEvent> {
     let mut events = Vec::new();
     let deadline = std::time::Instant::now() + timeout;
 
     while std::time::Instant::now() < deadline {
         match rx.try_recv() {
             Ok(event) => events.push(event),
-            Err(_) => monoio::time::sleep(Duration::from_millis(50)).await,
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
 
@@ -33,25 +31,24 @@ async fn collect_events(
     events
 }
 
-#[monoio::test(enable_timer = true)]
-async fn test_cfg_file_watcher_detects_creation() {
+#[test]
+fn test_cfg_file_watcher_detects_creation() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let watch_dir = temp_dir.path().to_path_buf();
 
     let mut monitor = ConfigFileWatcher::new(watch_dir.clone(), Duration::from_millis(100));
-    let mut rx = monitor
+    let rx = monitor
         .start_monitoring()
-        .await
         .expect("Failed to start monitoring");
 
     // Give the watcher a moment to initialise.
-    monoio::time::sleep(Duration::from_millis(200)).await;
+    std::thread::sleep(Duration::from_millis(200));
 
     // Create a .toml file — should trigger a Created event.
     let file_path = watch_dir.join("test.toml");
     fs::write(&file_path, "[namespace]\nname = \"test\"\n").expect("Failed to write file");
 
-    let events = collect_events(&mut rx, Duration::from_secs(2)).await;
+    let events = collect_events(&rx, Duration::from_secs(2));
 
     assert!(
         !events.is_empty(),
@@ -68,8 +65,8 @@ async fn test_cfg_file_watcher_detects_creation() {
     );
 }
 
-#[monoio::test(enable_timer = true)]
-async fn test_cfg_file_watcher_detects_modification() {
+#[test]
+fn test_cfg_file_watcher_detects_modification() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let watch_dir = temp_dir.path().to_path_buf();
 
@@ -79,17 +76,16 @@ async fn test_cfg_file_watcher_detects_modification() {
     fs::write(&file_path, "[namespace]\nname = \"v1\"\n").expect("Failed to write initial file");
 
     let mut monitor = ConfigFileWatcher::new(watch_dir.clone(), Duration::from_millis(100));
-    let mut rx = monitor
+    let rx = monitor
         .start_monitoring()
-        .await
         .expect("Failed to start monitoring");
 
-    monoio::time::sleep(Duration::from_millis(200)).await;
+    std::thread::sleep(Duration::from_millis(200));
 
     // Modify the file.
     fs::write(&file_path, "[namespace]\nname = \"v2\"\n").expect("Failed to modify file");
 
-    let events = collect_events(&mut rx, Duration::from_secs(2)).await;
+    let events = collect_events(&rx, Duration::from_secs(2));
 
     assert!(
         !events.is_empty(),
@@ -106,8 +102,8 @@ async fn test_cfg_file_watcher_detects_modification() {
     );
 }
 
-#[monoio::test(enable_timer = true)]
-async fn test_cfg_file_watcher_detects_deletion() {
+#[test]
+fn test_cfg_file_watcher_detects_deletion() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let watch_dir = temp_dir.path().to_path_buf();
 
@@ -116,17 +112,16 @@ async fn test_cfg_file_watcher_detects_deletion() {
     fs::write(&file_path, "[namespace]\nname = \"gone\"\n").expect("Failed to write file");
 
     let mut monitor = ConfigFileWatcher::new(watch_dir.clone(), Duration::from_millis(100));
-    let mut rx = monitor
+    let rx = monitor
         .start_monitoring()
-        .await
         .expect("Failed to start monitoring");
 
-    monoio::time::sleep(Duration::from_millis(200)).await;
+    std::thread::sleep(Duration::from_millis(200));
 
     // Delete the file.
     fs::remove_file(&file_path).expect("Failed to delete file");
 
-    let events = collect_events(&mut rx, Duration::from_secs(2)).await;
+    let events = collect_events(&rx, Duration::from_secs(2));
 
     assert!(
         !events.is_empty(),
@@ -142,24 +137,23 @@ async fn test_cfg_file_watcher_detects_deletion() {
     );
 }
 
-#[monoio::test(enable_timer = true)]
-async fn test_cfg_file_watcher_ignores_non_toml() {
+#[test]
+fn test_cfg_file_watcher_ignores_non_toml() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let watch_dir = temp_dir.path().to_path_buf();
 
     let mut monitor = ConfigFileWatcher::new(watch_dir.clone(), Duration::from_millis(100));
-    let mut rx = monitor
+    let rx = monitor
         .start_monitoring()
-        .await
         .expect("Failed to start monitoring");
 
-    monoio::time::sleep(Duration::from_millis(200)).await;
+    std::thread::sleep(Duration::from_millis(200));
 
     // Create a non-.toml file — should be silently ignored.
     fs::write(watch_dir.join("readme.txt"), "hello").expect("Failed to write file");
     fs::write(watch_dir.join("config.json"), "{}").expect("Failed to write file");
 
-    let events = collect_events(&mut rx, Duration::from_secs(1)).await;
+    let events = collect_events(&rx, Duration::from_secs(1));
 
     assert!(
         events.is_empty(),
@@ -168,30 +162,29 @@ async fn test_cfg_file_watcher_ignores_non_toml() {
     );
 }
 
-#[monoio::test(enable_timer = true)]
-async fn test_cfg_file_watcher_debounces_rapid_writes() {
+#[test]
+fn test_cfg_file_watcher_debounces_rapid_writes() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let watch_dir = temp_dir.path().to_path_buf();
 
     // Use a 500ms debounce so rapid writes within that window are collapsed.
     let mut monitor = ConfigFileWatcher::new(watch_dir.clone(), Duration::from_millis(500));
-    let mut rx = monitor
+    let rx = monitor
         .start_monitoring()
-        .await
         .expect("Failed to start monitoring");
 
-    monoio::time::sleep(Duration::from_millis(200)).await;
+    std::thread::sleep(Duration::from_millis(200));
 
     let file_path = watch_dir.join("rapid.toml");
 
     // Create the file, then rapidly modify it several times.
     fs::write(&file_path, "v1").expect("write");
-    monoio::time::sleep(Duration::from_millis(10)).await;
+    std::thread::sleep(Duration::from_millis(10));
     fs::write(&file_path, "v2").expect("write");
-    monoio::time::sleep(Duration::from_millis(10)).await;
+    std::thread::sleep(Duration::from_millis(10));
     fs::write(&file_path, "v3").expect("write");
 
-    let events = collect_events(&mut rx, Duration::from_secs(2)).await;
+    let events = collect_events(&rx, Duration::from_secs(2));
 
     // With a 500ms debounce the first write should produce an event,
     // but the rapid follow-ups within the window should be suppressed.

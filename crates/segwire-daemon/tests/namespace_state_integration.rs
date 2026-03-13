@@ -38,9 +38,9 @@ servers = ["8.8.8.8"]
     }
 }
 
-#[monoio::test]
-async fn test_state_manager_creation() {
-    let result = NamespaceStateManager::new().await;
+#[test]
+fn test_state_manager_creation() {
+    let result = NamespaceStateManager::new();
 
     // Creation might fail in test environment without proper netlink access
     // but we can test the basic structure

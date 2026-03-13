@@ -32,18 +32,18 @@ pub struct RestartArgs {
 }
 
 /// Execute the restart command
-pub async fn execute(client: DbusClient, args: RestartArgs) -> Result<()> {
+pub fn execute(client: DbusClient, args: RestartArgs) -> Result<()> {
     // Check if daemon is available
-    if !client.is_service_available().await {
+    if !client.is_service_available() {
         eprintln!("Error: segwire daemon is not running or not accessible");
         eprintln!("Please ensure segwire-daemon is started and running");
         std::process::exit(1);
     }
 
-    restart_namespace(&client, &args).await
+    restart_namespace(&client, &args)
 }
 
-async fn restart_namespace(client: &DbusClient, args: &RestartArgs) -> Result<()> {
+fn restart_namespace(client: &DbusClient, args: &RestartArgs) -> Result<()> {
     // Validate namespace name
     if args.namespace.is_empty() {
         return Err(anyhow::anyhow!("Namespace name cannot be empty"));
@@ -81,7 +81,7 @@ async fn restart_namespace(client: &DbusClient, args: &RestartArgs) -> Result<()
     };
 
     // Issue the D-Bus restart call
-    let result = client.restart_namespace(&args.namespace).await?;
+    let result = client.restart_namespace(&args.namespace)?;
 
     if let Some(ref p) = progress {
         if result.success {

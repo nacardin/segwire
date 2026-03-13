@@ -40,20 +40,20 @@ impl NamespaceStatusFilter {
 }
 
 /// Execute the list command
-pub async fn execute(client: DbusClient, args: ListArgs) -> Result<()> {
+pub fn execute(client: DbusClient, args: ListArgs) -> Result<()> {
     // Check if daemon is available
-    if !client.is_service_available().await {
+    if !client.is_service_available() {
         eprintln!("Error: segwire daemon is not running or not accessible");
         eprintln!("Please ensure segwire-daemon is started and running");
         std::process::exit(1);
     }
 
-    list_namespaces(&client, &args).await
+    list_namespaces(&client, &args)
 }
 
-async fn list_namespaces(client: &DbusClient, args: &ListArgs) -> Result<()> {
+fn list_namespaces(client: &DbusClient, args: &ListArgs) -> Result<()> {
     // Fetch namespace list from daemon via D-Bus
-    let mut namespaces = client.list_namespaces().await?;
+    let mut namespaces = client.list_namespaces()?;
 
     // Apply status filter if specified
     if let Some(ref filter) = args.status {

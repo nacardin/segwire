@@ -90,13 +90,13 @@ object_path = "{}"
         self.config_dir.path()
     }
 
-    /// Start the daemon event loop on a background monoio task.
+    /// Start the daemon event loop on a background thread.
     ///
     /// Returns a `DaemonEventLoop` that can be used to interact with the daemon.
-    pub async fn start_daemon(&self) -> Result<DaemonEventLoop> {
+    pub fn start_daemon(&self) -> Result<DaemonEventLoop> {
         let config_content = std::fs::read_to_string(&self.config_path)?;
         let daemon_config: DaemonConfig = toml::from_str(&config_content)?;
-        let event_loop = DaemonEventLoop::new(daemon_config, self.config_path.clone()).await?;
+        let event_loop = DaemonEventLoop::new(daemon_config, self.config_path.clone())?;
         Ok(event_loop)
     }
 

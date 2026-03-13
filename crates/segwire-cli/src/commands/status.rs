@@ -30,9 +30,9 @@ pub struct StatusArgs {
 }
 
 /// Execute the status command
-pub async fn execute(client: DbusClient, args: StatusArgs) -> Result<()> {
+pub fn execute(client: DbusClient, args: StatusArgs) -> Result<()> {
     // Check if daemon is available
-    if !client.is_service_available().await {
+    if !client.is_service_available() {
         eprintln!("Error: segwire daemon is not running or not accessible");
         eprintln!("Please ensure segwire-daemon is started and running");
         std::process::exit(1);
@@ -41,20 +41,16 @@ pub async fn execute(client: DbusClient, args: StatusArgs) -> Result<()> {
     match &args.namespace {
         Some(namespace) => {
             // Show detailed status for specific namespace
-            show_namespace_status(&client, namespace, &args).await
+            show_namespace_status(&client, namespace, &args)
         }
         None => {
             // Show status for all namespaces
-            show_all_namespaces_status(&client, &args).await
+            show_all_namespaces_status(&client, &args)
         }
     }
 }
 
-async fn show_namespace_status(
-    client: &DbusClient,
-    namespace: &str,
-    args: &StatusArgs,
-) -> Result<()> {
+fn show_namespace_status(client: &DbusClient, namespace: &str, args: &StatusArgs) -> Result<()> {
     // Validate namespace name
     if namespace.is_empty() {
         return Err(anyhow::anyhow!("Namespace name cannot be empty"));
@@ -65,7 +61,7 @@ async fn show_namespace_status(
     }
 
     // Fetch detailed namespace state from daemon via D-Bus
-    let state = client.get_namespace_status(namespace).await?;
+    let state = client.get_namespace_status(namespace)?;
 
     let data = NamespaceStatusData {
         name: state.name,
@@ -101,11 +97,11 @@ async fn show_namespace_status(
     output::format_namespace_status(&data, &args.format, args.detailed)
 }
 
-async fn show_all_namespaces_status(client: &DbusClient, args: &StatusArgs) -> Result<()> {
-    // Fetch namespace list and daemon status in parallel
-    let namespaces = client.list_namespaces().await?;
+fn show_all_namespaces_status(client: &DbusClient, args: &StatusArgs) -> Result<()> {
+    // Fetch namespace list and daemon status
+    let namespaces = client.list_namespaces()?;
 
-    let daemon_status = match client.get_daemon_status().await {
+    let daemon_status = match client.get_daemon_status() {
         Ok((version, uptime, managed, active)) => Some(DaemonStatusInfo {
             version,
             uptime_secs: uptime,

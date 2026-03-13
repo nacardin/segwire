@@ -17,7 +17,7 @@ pub enum SegwireError {
     Network(String),
 
     #[error("D-Bus error: {0}")]
-    DBus(#[from] zbus::Error),
+    DBus(String),
 
     #[error("Permission denied: {0}")]
     Permission(String),

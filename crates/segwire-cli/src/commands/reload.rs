@@ -28,18 +28,18 @@ pub struct ReloadArgs {
 }
 
 /// Execute the reload command
-pub async fn execute(client: DbusClient, args: ReloadArgs) -> Result<()> {
+pub fn execute(client: DbusClient, args: ReloadArgs) -> Result<()> {
     // Check if daemon is available
-    if !client.is_service_available().await {
+    if !client.is_service_available() {
         eprintln!("Error: segwire daemon is not running or not accessible");
         eprintln!("Please ensure segwire-daemon is started and running");
         std::process::exit(1);
     }
 
-    reload_configuration(&client, &args).await
+    reload_configuration(&client, &args)
 }
 
-async fn reload_configuration(client: &DbusClient, args: &ReloadArgs) -> Result<()> {
+fn reload_configuration(client: &DbusClient, args: &ReloadArgs) -> Result<()> {
     if args.validate && args.verbose {
         println!("Validating configurations before reload...");
         // TODO: call client.validate_configuration() for each file
@@ -54,7 +54,7 @@ async fn reload_configuration(client: &DbusClient, args: &ReloadArgs) -> Result<
     };
 
     // Issue the D-Bus reload call
-    let result = client.reload_configuration().await?;
+    let result = client.reload_configuration()?;
 
     if let Some(ref p) = progress {
         if result.success {

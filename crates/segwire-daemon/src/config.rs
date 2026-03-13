@@ -3,7 +3,6 @@
 //! Handles loading and managing daemon configuration, including master configuration
 //! and namespace configuration scanning and monitoring.
 
-use monoio::time::sleep;
 use segwire_common::{
     config::{DaemonConfig, NamespaceConfig},
     error::{ConfigError, SegwireResult},
@@ -585,45 +584,51 @@ impl ConfigFileWatcher {
 
     /// Start monitoring configuration files for changes.
     ///
-    /// Uses Linux inotify for event-driven file watching instead of polling.
-    /// Returns a `local-sync` receiver for debounced file system events.
-    pub async fn start_monitoring(
+    /// Uses Linux inotify for event-driven file watching.
+    /// Spawns a dedicated OS thread and returns an `std::sync::mpsc::Receiver`
+    /// for debounced file system events.
+    pub fn start_monitoring(
         &mut self,
-    ) -> SegwireResult<local_sync::mpsc::unbounded::Rx<ConfigFileEvent>> {
+    ) -> SegwireResult<std::sync::mpsc::Receiver<ConfigFileEvent>> {
         info!(
             "Starting inotify-based configuration file monitoring for directory: {}",
             self.config_dir.display()
         );
 
-        let (tx, rx) = local_sync::mpsc::unbounded::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
 
         let config_dir = self.config_dir.clone();
         let debounce_duration = self.debounce_duration;
 
-        monoio::spawn(async move {
-            if let Err(e) = Self::watch_directory_inotify(config_dir, debounce_duration, tx).await {
-                error!("inotify-based file monitoring failed: {}", e);
-            }
-        });
+        std::thread::Builder::new()
+            .name("config-watcher".to_string())
+            .spawn(move || {
+                if let Err(e) = Self::watch_directory_inotify(config_dir, debounce_duration, tx) {
+                    error!("inotify-based file monitoring failed: {}", e);
+                }
+            })
+            .map_err(|e| segwire_common::error::ConfigError::InvalidValue {
+                field: "inotify_thread".to_string(),
+                value: format!("Failed to spawn watcher thread: {}", e),
+            })?;
 
         Ok(rx)
     }
 
     /// Watch a directory for file system changes using inotify.
     ///
-    /// Uses the Linux inotify API via `tpc-inotify` to receive kernel
+    /// Uses the Linux inotify API via the `inotify` crate to receive kernel
     /// notifications for file create/modify/delete events. Events are read
-    /// asynchronously through an `EventStream` backed by io_uring.
-    /// Debouncing is per-file-path to correctly handle rapid edits to
-    /// individual files.
-    async fn watch_directory_inotify(
+    /// via blocking I/O. Debouncing is per-file-path to correctly handle
+    /// rapid edits to individual files.
+    fn watch_directory_inotify(
         config_dir: PathBuf,
         debounce_duration: Duration,
-        tx: local_sync::mpsc::unbounded::Tx<ConfigFileEvent>,
+        tx: std::sync::mpsc::Sender<ConfigFileEvent>,
     ) -> SegwireResult<()> {
-        use inotify_tpc::{EventMask, Inotify, WatchMask};
+        use inotify::{EventMask, Inotify, WatchMask};
 
-        let inotify = Inotify::init().map_err(|e| {
+        let mut inotify = Inotify::init().map_err(|e| {
             error!("Failed to initialize inotify: {}", e);
             segwire_common::error::ConfigError::InvalidValue {
                 field: "inotify".to_string(),
@@ -656,100 +661,93 @@ impl ConfigFileWatcher {
 
         info!("inotify watch established for: {}", config_dir.display());
 
-        let mut stream = inotify.into_event_stream().map_err(|e| {
-            error!("Failed to create inotify event stream: {}", e);
-            segwire_common::error::ConfigError::InvalidValue {
-                field: "inotify_stream".to_string(),
-                value: format!("Failed to create event stream: {}", e),
-            }
-        })?;
-
         // Per-file debounce tracking
         let mut last_events: HashMap<PathBuf, Instant> = HashMap::new();
+        let mut buffer = [0u8; 4096];
 
         loop {
-            let event = match stream.next_event().await {
-                Ok(event) => event,
+            let events = match inotify.read_events_blocking(&mut buffer) {
+                Ok(events) => events,
                 Err(e) => {
                     error!("inotify read error: {}", e);
                     // Brief backoff before retrying
-                    sleep(Duration::from_secs(1)).await;
+                    std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
             };
 
-            // Only process events for .toml files
-            let name = match event.name {
-                Some(name) => name,
-                None => continue,
-            };
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => continue,
-            };
-            if !name_str.ends_with(".toml") {
-                continue;
-            }
-
-            let path = config_dir.join(&name);
-
-            // Per-file-path debounce: skip if we emitted an event
-            // for this path within the debounce window.
-            let now = Instant::now();
-            if let Some(last) = last_events.get(&path) {
-                if now.duration_since(*last) < debounce_duration {
-                    debug!("Debouncing event for: {}", path.display());
+            for event in events {
+                // Only process events for .toml files
+                let name = match event.name {
+                    Some(name) => name,
+                    None => continue,
+                };
+                let name_str = match name.to_str() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if !name_str.ends_with(".toml") {
                     continue;
                 }
-            }
-            last_events.insert(path.clone(), now);
 
-            let mask = event.mask;
-            let file_event = if mask.contains(EventMask::CREATE)
-                || mask.contains(EventMask::MOVED_TO)
-            {
-                Some(ConfigFileEvent::Created(path))
-            } else if mask.contains(EventMask::MODIFY) || mask.contains(EventMask::CLOSE_WRITE) {
-                Some(ConfigFileEvent::Modified(path))
-            } else if mask.contains(EventMask::DELETE) || mask.contains(EventMask::MOVED_FROM) {
-                Some(ConfigFileEvent::Deleted(path))
-            } else {
-                None
-            };
+                let path = config_dir.join(name);
 
-            if let Some(evt) = file_event {
-                debug!("Sending inotify file event: {:?}", evt);
-                if tx.send(evt).is_err() {
-                    warn!("Failed to send file event — receiver dropped");
-                    return Ok(());
+                // Per-file-path debounce: skip if we emitted an event
+                // for this path within the debounce window.
+                let now = Instant::now();
+                if let Some(last) = last_events.get(&path) {
+                    if now.duration_since(*last) < debounce_duration {
+                        debug!("Debouncing event for: {}", path.display());
+                        continue;
+                    }
                 }
-            }
+                last_events.insert(path.clone(), now);
 
-            // Periodically prune stale debounce entries (older than 10× debounce window)
-            let prune_cutoff = debounce_duration * 10;
-            last_events.retain(|_, last| now.duration_since(*last) < prune_cutoff);
+                let mask = event.mask;
+                let file_event = if mask.contains(EventMask::CREATE)
+                    || mask.contains(EventMask::MOVED_TO)
+                {
+                    Some(ConfigFileEvent::Created(path))
+                } else if mask.contains(EventMask::MODIFY) || mask.contains(EventMask::CLOSE_WRITE)
+                {
+                    Some(ConfigFileEvent::Modified(path))
+                } else if mask.contains(EventMask::DELETE) || mask.contains(EventMask::MOVED_FROM) {
+                    Some(ConfigFileEvent::Deleted(path))
+                } else {
+                    None
+                };
+
+                if let Some(evt) = file_event {
+                    debug!("Sending inotify file event: {:?}", evt);
+                    if tx.send(evt).is_err() {
+                        warn!("Failed to send file event — receiver dropped");
+                        return Ok(());
+                    }
+                }
+
+                // Periodically prune stale debounce entries (older than 10× debounce window)
+                let prune_cutoff = debounce_duration * 10;
+                last_events.retain(|_, last| now.duration_since(*last) < prune_cutoff);
+            }
         }
     }
 }
 
 impl ConfigManager {
     /// Start monitoring configuration files for changes
-    pub async fn start_file_monitoring(
+    pub fn start_file_monitoring(
         &mut self,
-    ) -> SegwireResult<local_sync::mpsc::unbounded::Rx<ConfigFileEvent>> {
+    ) -> SegwireResult<std::sync::mpsc::Receiver<ConfigFileEvent>> {
         let mut monitor = ConfigFileWatcher::new(
             self.config_directory().to_path_buf(),
             Duration::from_millis(1000), // 1 second debounce
         );
 
-        monitor.start_monitoring().await
+        monitor.start_monitoring()
     }
 
     /// Handle a file system event by updating configurations
-    pub async fn handle_file_event(
-        &mut self,
-        event: ConfigFileEvent,
-    ) -> SegwireResult<Vec<String>> {
+    pub fn handle_file_event(&mut self, event: ConfigFileEvent) -> SegwireResult<Vec<String>> {
         match event {
             ConfigFileEvent::Created(path) => {
                 info!("Configuration file created: {}", path.display());
@@ -1184,8 +1182,8 @@ mod tests {
         assert_eq!(stats.total_configs, 2);
     }
 
-    #[monoio::test]
-    async fn test_file_event_handling() {
+    #[test]
+    fn test_file_event_handling() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let daemon_config_path = create_test_daemon_config(&temp_dir, "test");
 
@@ -1196,7 +1194,6 @@ mod tests {
         let event = ConfigFileEvent::Created(new_config_path.clone());
         let result = config_manager
             .handle_file_event(event)
-            .await
             .expect("Failed to handle create event");
 
         assert_eq!(result.len(), 1);
@@ -1227,7 +1224,6 @@ mod tests {
         let event = ConfigFileEvent::Modified(new_config_path.clone());
         let result = config_manager
             .handle_file_event(event)
-            .await
             .expect("Failed to handle modify event");
 
         assert_eq!(result.len(), 1);
@@ -1243,7 +1239,6 @@ mod tests {
         let event = ConfigFileEvent::Deleted(new_config_path);
         let result = config_manager
             .handle_file_event(event)
-            .await
             .expect("Failed to handle delete event");
 
         assert_eq!(result.len(), 1);

@@ -8,7 +8,7 @@
 //! - Privilege checks via `nix::unistd::Uid`
 //!
 //! The companion `netlink_raw` module handles netlink socket operations
-//! via `netlink-tpc` and contains **zero** `nix` imports.
+//! via raw netlink sockets and contains **zero** `nix` imports.
 
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::sched::{unshare, CloneFlags};

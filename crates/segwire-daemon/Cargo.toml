@@ -9,12 +9,11 @@ description = "System daemon for managing Linux network namespaces"
 segwire-common = { workspace = true }
 
 # D-Bus communication
-zbus = { workspace = true }
-zvariant = { workspace = true }
+dbus = { workspace = true }
+dbus-crossroads = { workspace = true }
 
 # Network namespace management
 nix = { workspace = true }
-netlink-tpc = { workspace = true }
 netlink-packet-route = { workspace = true }
 netlink-packet-core = { workspace = true }
 
@@ -22,8 +21,8 @@ netlink-packet-core = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 
-# File system monitoring with io_uring
-monoio = { workspace = true }
+# File system monitoring
+inotify = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
@@ -32,10 +31,7 @@ tracing-subscriber = { workspace = true }
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-async-lock = "3.4.2"
 ctrlc = "3.5.2"
-inotify-tpc = { workspace = true }
-local-sync = "0.1"
 
 [dev-dependencies]
 tempfile = "3.8"

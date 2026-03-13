@@ -4,8 +4,7 @@ use segwire_daemon::event_loop::DaemonEventLoop;
 use std::path::PathBuf;
 use tracing::info;
 
-#[monoio::main]
-async fn main() -> SegwireResult<()> {
+fn main() -> SegwireResult<()> {
     // Default configuration path
     let config_path = PathBuf::from("/etc/segwire/daemon.toml");
 
@@ -59,8 +58,8 @@ async fn main() -> SegwireResult<()> {
     );
 
     // Create and run the daemon event loop
-    let daemon = DaemonEventLoop::new(daemon_config, config_path).await?;
-    daemon.run().await?;
+    let daemon = DaemonEventLoop::new(daemon_config, config_path)?;
+    daemon.run()?;
 
     info!("Segwire daemon stopped");
     Ok(())

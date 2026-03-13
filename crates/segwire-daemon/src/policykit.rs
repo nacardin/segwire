@@ -3,20 +3,24 @@
 //! Provides authorization checking for D-Bus method calls using PolicyKit,
 //! ensuring that only authorized users can perform privileged operations.
 
+use dbus::blocking::Connection;
 use segwire_common::error::SegwireError;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, warn};
-use zbus::Connection;
 
 /// PolicyKit authorization checker
 pub struct PolicyKitAuthorizer {
-    _connection: Connection,
+    connection: Connection,
     action_mappings: HashMap<String, String>,
 }
 
 impl PolicyKitAuthorizer {
     /// Create a new PolicyKit authorizer
-    pub fn new(connection: Connection) -> Self {
+    ///
+    /// Clones the underlying connection handle so the authorizer
+    /// can make its own D-Bus calls without borrowing the service connection.
+    pub fn new(_connection: &Connection) -> Result<Self, SegwireError> {
         let mut action_mappings = HashMap::new();
 
         // Map D-Bus method names to PolicyKit actions
@@ -28,16 +32,25 @@ impl PolicyKitAuthorizer {
         action_mappings.insert("reload".to_string(), actions::MANAGE.to_string());
         action_mappings.insert("validate".to_string(), actions::STATUS.to_string());
 
-        Self {
-            _connection: connection,
-            action_mappings,
+        // Open a separate connection for authorization calls so we don't
+        // interfere with the main service connection's message dispatch.
+        let auth_conn = if std::env::var("SEGWIRE_SIMULATION").is_ok() {
+            Connection::new_session()
+        } else {
+            Connection::new_system()
         }
+        .map_err(|e| SegwireError::DBus(format!("Failed to open auth D-Bus connection: {}", e)))?;
+
+        Ok(Self {
+            connection: auth_conn,
+            action_mappings,
+        })
     }
 
-    pub async fn check_authorization(
+    pub fn check_authorization(
         &self,
         action: &str,
-        sender: &zbus::names::UniqueName<'_>,
+        sender: &str,
     ) -> Result<(), SegwireError> {
         debug!("Checking PolicyKit authorization for action: {}", action);
 
@@ -50,15 +63,10 @@ impl PolicyKitAuthorizer {
         debug!("Checking authorization for action '{}'", action_id);
 
         // Get the sender's process info (PID, UID)
-        let process_info = self
-            .get_sender_process_info(&zbus::names::BusName::Unique(sender.clone()))
-            .await?;
+        let process_info = self.get_sender_process_info(sender)?;
 
         // Call PolicyKit to check authorization
-        match self
-            .call_policykit_check_authorization(&process_info, action_id)
-            .await
-        {
+        match self.call_policykit_check_authorization(&process_info, action_id) {
             Ok(AuthorizationResult::Authorized) => {
                 debug!("Authorization granted for action '{}'", action);
                 Ok(())
@@ -71,7 +79,6 @@ impl PolicyKitAuthorizer {
                 )))
             }
             Ok(AuthorizationResult::AuthenticationRequired) => {
-                // Interactive authentication would be handled here
                 warn!("Interactive authentication required for action '{}', but not supported by daemon", action_id);
                 Err(SegwireError::Permission(format!(
                     "Interactive authentication required for action: {}",
@@ -96,26 +103,30 @@ impl PolicyKitAuthorizer {
     }
 
     /// Get the process information for a D-Bus sender
-    async fn get_sender_process_info(
-        &self,
-        sender: &zbus::names::BusName<'_>,
-    ) -> Result<ProcessInfo, SegwireError> {
+    fn get_sender_process_info(&self, sender: &str) -> Result<ProcessInfo, SegwireError> {
         debug!("Getting process info for D-Bus sender: {}", sender);
 
-        // Use D-Bus to get the process ID of the sender
-        let dbus_proxy = zbus::fdo::DBusProxy::new(&self._connection)
-            .await
-            .map_err(SegwireError::DBus)?;
+        let proxy = self.connection.with_proxy(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            Duration::from_secs(5),
+        );
 
-        let pid = dbus_proxy
-            .get_connection_unix_process_id(sender.into())
-            .await
-            .map_err(|e| SegwireError::DBus(e.into()))?;
+        let (pid,): (u32,) = proxy
+            .method_call(
+                "org.freedesktop.DBus",
+                "GetConnectionUnixProcessID",
+                (sender,),
+            )
+            .map_err(|e| SegwireError::DBus(format!("Failed to get sender PID: {}", e)))?;
 
-        let uid = dbus_proxy
-            .get_connection_unix_user(sender.into())
-            .await
-            .map_err(|e| SegwireError::DBus(e.into()))?;
+        let (uid,): (u32,) = proxy
+            .method_call(
+                "org.freedesktop.DBus",
+                "GetConnectionUnixUser",
+                (sender,),
+            )
+            .map_err(|e| SegwireError::DBus(format!("Failed to get sender UID: {}", e)))?;
 
         debug!("Sender '{}' has PID {} and UID {}", sender, pid, uid);
 
@@ -129,7 +140,7 @@ impl PolicyKitAuthorizer {
     /// PID and start-time.  If the PolicyKit daemon is not reachable we
     /// fall back to a simple UID==0 check so that the daemon still works
     /// on systems without PolicyKit installed.
-    async fn call_policykit_check_authorization(
+    fn call_policykit_check_authorization(
         &self,
         process_info: &ProcessInfo,
         action_id: &str,
@@ -139,68 +150,53 @@ impl PolicyKitAuthorizer {
             process_info.pid, process_info.uid, action_id
         );
 
-        // Try to build a proxy for the PolicyKit Authority
-        let pk_proxy = match zbus::Proxy::new(
-            &self._connection,
+        let pk_proxy = self.connection.with_proxy(
             "org.freedesktop.PolicyKit1",
             "/org/freedesktop/PolicyKit1/Authority",
-            "org.freedesktop.PolicyKit1.Authority",
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    "PolicyKit Authority proxy creation failed ({}), falling back to UID check",
-                    e
-                );
-                return Ok(self.uid_fallback(process_info));
-            }
-        };
+            Duration::from_secs(5),
+        );
 
         // Build the "subject" struct:
         //   (sa{sv})  →  ("unix-process", { "pid" => u32, "start-time" => u64 })
         // start-time 0 tells polkit to look it up itself.
         let subject_kind = "unix-process";
-        let pid_variant = zvariant::Value::U32(process_info.pid);
-        let start_time_variant = zvariant::Value::U64(0u64);
-        let subject_details: HashMap<&str, zvariant::Value<'_>> =
-            HashMap::from([("pid", pid_variant), ("start-time", start_time_variant)]);
+        let subject_details: HashMap<&str, dbus::arg::Variant<Box<dyn dbus::arg::RefArg>>> =
+            HashMap::from([
+                (
+                    "pid",
+                    dbus::arg::Variant(Box::new(process_info.pid) as Box<dyn dbus::arg::RefArg>),
+                ),
+                (
+                    "start-time",
+                    dbus::arg::Variant(Box::new(0u64) as Box<dyn dbus::arg::RefArg>),
+                ),
+            ]);
 
         let details: HashMap<&str, &str> = HashMap::new();
         let flags: u32 = 0; // 0 = do not allow interactive auth
+        let cancellation_id = "";
 
-        // Call CheckAuthorization(subject, action_id, details, flags, cancellation_id)
-        let reply = pk_proxy
-            .call_method(
+        let reply: Result<(bool, bool, HashMap<String, String>), dbus::Error> = pk_proxy
+            .method_call(
+                "org.freedesktop.PolicyKit1.Authority",
                 "CheckAuthorization",
-                &(
+                (
                     (subject_kind, &subject_details),
                     action_id,
                     &details,
                     flags,
-                    "", // cancellation_id
+                    cancellation_id,
                 ),
-            )
-            .await;
+            );
 
         match reply {
-            Ok(msg) => {
-                // PolicyKit returns (bba{ss}) → (is_authorized, is_challenge, details)
-                match msg.body::<(bool, bool, HashMap<String, String>)>() {
-                    Ok((is_authorized, is_challenge, _details)) => {
-                        if is_authorized {
-                            Ok(AuthorizationResult::Authorized)
-                        } else if is_challenge {
-                            Ok(AuthorizationResult::AuthenticationRequired)
-                        } else {
-                            Ok(AuthorizationResult::NotAuthorized)
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse PolicyKit response: {}", e);
-                        Ok(self.uid_fallback(process_info))
-                    }
+            Ok((is_authorized, is_challenge, _details)) => {
+                if is_authorized {
+                    Ok(AuthorizationResult::Authorized)
+                } else if is_challenge {
+                    Ok(AuthorizationResult::AuthenticationRequired)
+                } else {
+                    Ok(AuthorizationResult::NotAuthorized)
                 }
             }
             Err(e) => {
@@ -269,10 +265,17 @@ pub mod actions {
 mod tests {
     use super::*;
 
-    #[monoio::test]
-    async fn test_action_mappings() {
-        let _connection = Connection::system().await.unwrap();
-        let authorizer = PolicyKitAuthorizer::new(_connection);
+    #[test]
+    fn test_action_mappings() {
+        // Skip if system bus is not available (CI, containers, etc.)
+        let connection = match Connection::new_system() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let authorizer = match PolicyKitAuthorizer::new(&connection) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
 
         // Test that all expected actions are mapped
         assert!(authorizer.action_mappings.contains_key("list"));

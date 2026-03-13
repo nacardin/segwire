@@ -10,9 +10,9 @@ use segwire_test::harness::{sample_namespace_config, TestHarness};
 ///
 /// NOTE: Only one daemon startup test per process is possible because
 /// `DbusService::new()` claims a fixed D-Bus service name and the
-/// `monoio` runtime doesn't clean up connections between tests.
-#[monoio::test]
-async fn test_daemon_startup_with_config() {
+/// the zbus runtime doesn't clean up connections between tests.
+#[test]
+fn test_daemon_startup_with_config() {
     let harness = TestHarness::new().expect("Failed to create test harness");
 
     // Write namespace config files before starting the daemon
@@ -24,7 +24,7 @@ async fn test_daemon_startup_with_config() {
         .expect("Failed to write namespace config");
 
     // Starting the daemon in simulation mode should succeed
-    let event_loop = harness.start_daemon().await;
+    let event_loop = harness.start_daemon();
     assert!(
         event_loop.is_ok(),
         "Daemon failed to start in simulation mode: {:?}",
@@ -37,8 +37,8 @@ async fn test_daemon_startup_with_config() {
 
 /// Test that writing and then removing a config file works correctly
 /// through the harness (does not start the daemon).
-#[monoio::test]
-async fn test_config_file_lifecycle() {
+#[test]
+fn test_config_file_lifecycle() {
     let harness = TestHarness::new().expect("Failed to create test harness");
 
     // Write a config

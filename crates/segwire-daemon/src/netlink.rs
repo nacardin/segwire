@@ -44,8 +44,8 @@ impl SimulatedState {
 enum NetlinkBackend {
     /// Real backend for production use.
     ///
-    /// No socket is stored — a fresh `NetlinkSocket` is created on demand
-    /// inside each async method.  This keeps `NetlinkManager: Send`.
+    /// No socket is stored — a fresh netlink socket is created on demand
+    /// inside each method.  This keeps `NetlinkManager: Send`.
     Real,
     /// In-memory simulation for testing.
     Simulated(RefCell<SimulatedState>),
@@ -54,8 +54,8 @@ enum NetlinkBackend {
 /// High-level interface for network namespace operations.
 ///
 /// Uses [`crate::netlink_raw`] and [`crate::netns_raw`] for all kernel
-/// interactions.  Link operations that need an async netlink socket create
-/// one on demand (no `!Send` state is stored).
+/// interactions.  Link operations that need a netlink socket create one
+/// on demand (no `!Send` state is stored).
 ///
 /// In simulation mode (created via `new_simulated()` or `new_auto()` with
 /// `SEGWIRE_SIMULATION=1`), all operations act on an in-memory map instead
@@ -248,8 +248,7 @@ impl NetlinkManager {
             return Ok(vec!["lo".to_string(), "eth0".to_string()]);
         }
 
-        let names = netlink_raw::dump_interface_names_fresh()
-            .map_err(NetlinkError::SocketError)?;
+        let names = netlink_raw::dump_interface_names_fresh().map_err(NetlinkError::SocketError)?;
         Ok(names)
     }
 
@@ -278,9 +277,8 @@ impl NetlinkManager {
         }
 
         let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
-        let result =
-            netns_raw::run_in_namespace(&ns_path, netlink_raw::dump_interface_names_fresh)
-                .map_err(SegwireError::Network)?;
+        let result = netns_raw::run_in_namespace(&ns_path, netlink_raw::dump_interface_names_fresh)
+            .map_err(SegwireError::Network)?;
 
         result.map_err(SegwireError::Network)
     }
@@ -315,14 +313,13 @@ impl NetlinkManager {
             .map_err(NetlinkError::SocketError)?;
 
         let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
-        netlink_raw::move_interface_to_ns_sync(ifindex, &ns_path)
-            .map_err(|e| {
-                NetlinkError::InterfaceMoveFailed(
-                    interface_name.to_string(),
-                    namespace_name.to_string(),
-                    e,
-                )
-            })?;
+        netlink_raw::move_interface_to_ns_sync(ifindex, &ns_path).map_err(|e| {
+            NetlinkError::InterfaceMoveFailed(
+                interface_name.to_string(),
+                namespace_name.to_string(),
+                e,
+            )
+        })?;
 
         info!(
             "Moved interface '{}' to namespace '{}'",
@@ -399,10 +396,9 @@ impl NetlinkManager {
             .into());
         }
 
-        netlink_raw::create_veth_pair_sync(veth_name, peer_name)
-            .map_err(|e| {
-                NetlinkError::VirtualInterfaceCreateFailed(veth_name.to_string(), e.to_string())
-            })?;
+        netlink_raw::create_veth_pair_sync(veth_name, peer_name).map_err(|e| {
+            NetlinkError::VirtualInterfaceCreateFailed(veth_name.to_string(), e.to_string())
+        })?;
 
         info!("Created veth pair '{}'<->'{}'", veth_name, peer_name);
         Ok(())

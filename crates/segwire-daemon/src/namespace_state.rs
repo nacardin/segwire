@@ -74,7 +74,7 @@ pub enum ConflictResolution {
 
 impl NamespaceStateManager {
     /// Create a new namespace state manager
-    pub async fn new() -> SegwireResult<Self> {
+    pub fn new() -> SegwireResult<Self> {
         info!("Initializing namespace state manager");
 
         let netlink_manager = NetlinkManager::new().map_err(|e| {
@@ -92,7 +92,7 @@ impl NamespaceStateManager {
 
     /// Create a namespace state manager, auto-selecting real or simulated mode
     /// based on the `SEGWIRE_SIMULATION` env var.
-    pub async fn new_auto() -> SegwireResult<Self> {
+    pub fn new_auto() -> SegwireResult<Self> {
         info!("Initializing namespace state manager (auto-detect mode)");
 
         let netlink_manager = NetlinkManager::new_auto().map_err(|e| {
@@ -145,16 +145,13 @@ impl NamespaceStateManager {
     }
 
     /// Force a state synchronization regardless of timing
-    pub async fn force_sync(
-        &mut self,
-        config_manager: &ConfigManager,
-    ) -> SegwireResult<SyncResult> {
+    pub fn force_sync(&mut self, config_manager: &ConfigManager) -> SegwireResult<SyncResult> {
         info!("Forcing namespace state synchronization");
-        self.synchronize_state(config_manager).await
+        self.synchronize_state(config_manager)
     }
 
     /// Synchronize in-memory state with configuration and actual namespaces
-    pub async fn synchronize_state(
+    pub fn synchronize_state(
         &mut self,
         config_manager: &ConfigManager,
     ) -> SegwireResult<SyncResult> {
@@ -197,10 +194,11 @@ impl NamespaceStateManager {
 
         // Process each configured namespace
         for (config_name, config_entry) in namespace_configs {
-            match self
-                .process_configured_namespace(config_name, config_entry, &managed_actual_namespaces)
-                .await
-            {
+            match self.process_configured_namespace(
+                config_name,
+                config_entry,
+                &managed_actual_namespaces,
+            ) {
                 Ok(action) => match action {
                     SyncAction::Created => result.created.push(config_name.clone()),
                     SyncAction::Updated => result.updated.push(config_name.clone()),
@@ -266,7 +264,7 @@ impl NamespaceStateManager {
     }
 
     /// Process a single configured namespace during synchronization
-    async fn process_configured_namespace(
+    fn process_configured_namespace(
         &mut self,
         _config_name: &str,
         config_entry: &NamespaceConfigEntry,
@@ -285,7 +283,7 @@ impl NamespaceStateManager {
             (Some(state), Some(actual)) => {
                 if self.needs_namespace_update(state, config_entry, actual) {
                     debug!("Namespace {} needs update", full_name);
-                    self.update_existing_namespace(config_entry, actual).await
+                    self.update_existing_namespace(config_entry, actual)
                 } else {
                     // Just update the timestamp
                     if let Some(state) = self.get_namespace_state_mut(full_name) {
@@ -312,7 +310,7 @@ impl NamespaceStateManager {
             // Namespace doesn't exist in state but exists in system - add to state
             (None, Some(actual)) => {
                 debug!("Adding existing namespace {} to state tracking", full_name);
-                let state = self.create_state_from_actual(config_entry, actual).await?;
+                let state = self.create_state_from_actual(config_entry, actual)?;
                 self.update_namespace_state(state);
                 Ok(SyncAction::Updated)
             }
@@ -320,7 +318,7 @@ impl NamespaceStateManager {
             // Namespace doesn't exist in state or system - create it
             (None, None) => {
                 debug!("Creating new namespace {}", full_name);
-                self.create_new_namespace(config_entry).await
+                self.create_new_namespace(config_entry)
             }
         }
     }
@@ -381,7 +379,7 @@ impl NamespaceStateManager {
     }
 
     /// Create a new namespace from configuration
-    async fn create_new_namespace(
+    fn create_new_namespace(
         &mut self,
         config_entry: &NamespaceConfigEntry,
     ) -> SegwireResult<SyncAction> {
@@ -427,7 +425,7 @@ impl NamespaceStateManager {
     }
 
     /// Update an existing namespace to match configuration
-    async fn update_existing_namespace(
+    fn update_existing_namespace(
         &mut self,
         config_entry: &NamespaceConfigEntry,
         actual_info: &segwire_common::netlink::NamespaceInfo,
@@ -498,7 +496,7 @@ impl NamespaceStateManager {
     }
 
     /// Create state entry from existing namespace
-    async fn create_state_from_actual(
+    fn create_state_from_actual(
         &self,
         config_entry: &NamespaceConfigEntry,
         actual_info: &segwire_common::netlink::NamespaceInfo,
@@ -588,7 +586,7 @@ impl NamespaceStateManager {
     }
 
     /// Resolve conflicts by applying the suggested resolution
-    pub async fn resolve_conflict(
+    pub fn resolve_conflict(
         &mut self,
         conflict: &StateConflict,
         config_manager: &ConfigManager,
@@ -603,7 +601,7 @@ impl NamespaceStateManager {
                 if let Some(config_entry) =
                     config_manager.get_namespace_config(&conflict.namespace_name)
                 {
-                    self.create_new_namespace(config_entry).await?;
+                    self.create_new_namespace(config_entry)?;
                 } else {
                     return Err(SegwireError::Config(
                         segwire_common::error::ConfigError::InvalidValue {
@@ -670,7 +668,7 @@ impl NamespaceStateManager {
     }
 
     /// Perform periodic maintenance tasks
-    pub async fn perform_maintenance(&mut self) -> SegwireResult<()> {
+    pub fn perform_maintenance(&mut self) -> SegwireResult<()> {
         debug!("Performing namespace state maintenance");
 
         // Clean up old failed states (older than 1 hour)
@@ -713,7 +711,6 @@ pub struct StateStats {
     pub _last_sync: SystemTime,
 }
 
-// Note: Default implementation removed since new() is now async
 
 #[cfg(test)]
 mod tests {
@@ -753,8 +750,8 @@ servers = ["8.8.8.8"]
             last_modified: SystemTime::now(),
         }
     }
-    #[monoio::test]
-    async fn test_sync_timing() {
+    #[test]
+    fn test_sync_timing() {
         // Test sync timing logic without creating actual netlink manager
         let old_time = SystemTime::now() - Duration::from_secs(60); // 1 minute ago
         let recent_time = SystemTime::now() - Duration::from_secs(10); // 10 seconds ago
@@ -775,8 +772,8 @@ servers = ["8.8.8.8"]
         assert!(!needs_sync_recent);
     }
 
-    #[monoio::test]
-    async fn test_state_stats() {
+    #[test]
+    fn test_state_stats() {
         // Create a mock manager for testing
         let netlink_manager = match NetlinkManager::new() {
             Ok(manager) => manager,
@@ -815,8 +812,8 @@ servers = ["8.8.8.8"]
         assert_eq!(stats.deleting_namespaces, 0);
     }
 
-    #[monoio::test]
-    async fn test_needs_namespace_update() {
+    #[test]
+    fn test_needs_namespace_update() {
         let netlink_manager = match NetlinkManager::new() {
             Ok(manager) => manager,
             Err(_) => return, // Skip test if netlink is not available
@@ -867,8 +864,8 @@ servers = ["8.8.8.8"]
         assert!(manager.needs_namespace_update(&current_state, &config_entry, &actual_info));
     }
 
-    #[monoio::test]
-    async fn test_resolve_conflict_delete() {
+    #[test]
+    fn test_resolve_conflict_delete() {
         let netlink_manager = match NetlinkManager::new() {
             Ok(manager) => manager,
             Err(_) => return, // Skip test if netlink is not available
@@ -904,9 +901,7 @@ servers = ["8.8.8.8"]
 
         // This might fail at the netlink level if test-nonexistent doesn't exist,
         // but let's assert what happens. NetlinkManager returns an error for non-existent namespace.
-        let result = state_manager
-            .resolve_conflict(&conflict, &config_manager)
-            .await;
+        let result = state_manager.resolve_conflict(&conflict, &config_manager);
 
         // It returns an IO error from netlink delete.
         assert!(result.is_err());
@@ -916,8 +911,8 @@ servers = ["8.8.8.8"]
             .get_namespace_state("test-nonexistent")
             .is_some());
     }
-    #[monoio::test]
-    async fn test_state_operations() {
+    #[test]
+    fn test_state_operations() {
         // Create a mock manager for testing
         let netlink_manager = match NetlinkManager::new() {
             Ok(manager) => manager,

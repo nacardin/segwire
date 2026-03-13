@@ -9,8 +9,7 @@ use segwire_common::{
 };
 use std::path::PathBuf;
 
-#[monoio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize console logging with debug level
     let log_config = LogConfig {
         level: LogLevel::Debug,

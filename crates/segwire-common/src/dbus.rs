@@ -8,19 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
-use zvariant::Type;
 
-/// D-Bus interface name for the namespace manager
-pub const DBUS_INTERFACE_NAME: &str = "org.segwire.NamespaceManager";
-
-/// D-Bus service name
-pub const DBUS_SERVICE_NAME: &str = "org.segwire.NamespaceManager";
-
-/// D-Bus object path
-pub const DBUS_OBJECT_PATH: &str = "/org/segwire/NamespaceManager";
 
 /// Namespace state information for D-Bus communication
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceState {
     pub name: String,
     pub full_name: String,       // prefixed name
@@ -43,14 +34,8 @@ pub enum NamespaceStatus {
     Deleting,
 }
 
-impl zvariant::Type for NamespaceStatus {
-    fn signature() -> zvariant::Signature<'static> {
-        zvariant::Signature::from_static_str_unchecked("s")
-    }
-}
-
 /// Network interface information
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceInfo {
     pub name: String,
     pub interface_type: String, // physical, virtual, etc.
@@ -59,7 +44,7 @@ pub struct InterfaceInfo {
 }
 
 /// Route information
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteInfo {
     pub destination: String,
     pub gateway: String,
@@ -68,14 +53,14 @@ pub struct RouteInfo {
 }
 
 /// DNS configuration information
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsInfo {
     pub servers: Vec<String>,
     pub search_domains: Vec<String>,
 }
 
 /// D-Bus method call results
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationResult {
     pub success: bool,
     pub message: String,
@@ -83,7 +68,7 @@ pub struct OperationResult {
 }
 
 /// Configuration validation result
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationResult {
     pub valid: bool,
     pub errors: Vec<String>,
@@ -91,7 +76,7 @@ pub struct ValidationResult {
 }
 
 /// Progress information for long-running operations
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationProgress {
     pub operation: String,
     pub progress: f64, // 0.0 to 1.0
@@ -212,7 +197,7 @@ impl OperationResult {
 }
 
 /// D-Bus error types with descriptive messages
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DbusError {
     /// Configuration-related errors
     ConfigurationError(String),
@@ -271,7 +256,7 @@ impl From<SegwireError> for DbusError {
             SegwireError::Network(msg) => DbusError::NetworkError(msg.to_string()),
             SegwireError::Permission(msg) => DbusError::PermissionDenied(msg),
             SegwireError::System(msg) => DbusError::SystemError(msg.to_string()),
-            SegwireError::DBus(msg) => DbusError::InternalError(msg.to_string()),
+            SegwireError::DBus(msg) => DbusError::InternalError(msg),
             SegwireError::Validation(msg) => DbusError::ConfigurationError(msg),
         }
     }
@@ -691,12 +676,6 @@ pub mod interface {
 /// Helper functions for D-Bus interface management
 pub mod interface_helpers {
     use super::*;
-
-    /// Create a D-Bus error from a SegwireError
-    pub fn create_dbus_error(error: SegwireError) -> zbus::fdo::Error {
-        let dbus_error = DbusError::from(error);
-        zbus::fdo::Error::Failed(dbus_error.message().to_string())
-    }
 
     /// Convert a namespace list to D-Bus tuple format
     pub fn namespaces_to_tuples(

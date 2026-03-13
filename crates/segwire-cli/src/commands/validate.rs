@@ -36,7 +36,7 @@ pub enum OutputFormat {
 }
 
 /// Execute the validate command (no D-Bus client needed — all validation is local)
-pub async fn execute(args: ValidateArgs) -> Result<()> {
+pub fn execute(args: ValidateArgs) -> Result<()> {
     let mut validation_results = Vec::new();
     let total_files;
     let mut error_count = 0;

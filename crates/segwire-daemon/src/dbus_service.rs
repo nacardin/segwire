@@ -1,20 +1,29 @@
 //! D-Bus service implementation for the segwire daemon
 //!
-//! Provides the D-Bus interface for CLI communication, including service registration,
-//! method call handling, and PolicyKit integration for authorization.
+//! Provides the D-Bus interface for CLI communication using the `dbus` crate
+//! with `dbus-crossroads` for method dispatch. Fully synchronous — no internal
+//! async executor.
 
-use async_lock::Mutex as AsyncMutex;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use dbus::blocking::Connection;
+use dbus::channel::MatchingReceiver;
+use dbus_crossroads::Crossroads;
 use segwire_common::dbus::{
-    interface, interface_helpers, method_signatures, DbusError, NamespaceState, OperationResult,
-    ValidationResult,
+    interface, interface_helpers, DbusError, NamespaceState, OperationResult, ValidationResult,
 };
 use segwire_common::error::{ErrorContext, SegwireError};
 use segwire_common::{log_info, LogContext};
 use tracing::{debug, info, warn};
-use zbus::{Connection, ConnectionBuilder, SignalContext};
+
+/// Shared state accessible from D-Bus method handlers
+struct ServiceState {
+    config_manager: Arc<Mutex<crate::config::ConfigManager>>,
+    state_manager: Arc<Mutex<crate::namespace_state::NamespaceStateManager>>,
+    daemon_start_time: SystemTime,
+    authorizer: Option<crate::policykit::PolicyKitAuthorizer>,
+}
 
 pub struct DbusService {
     connection: Connection,
@@ -22,12 +31,12 @@ pub struct DbusService {
 
 impl DbusService {
     /// Create a new D-Bus service instance
-    pub async fn new(
-        config_manager: Arc<AsyncMutex<crate::config::ConfigManager>>,
-        state_manager: Arc<AsyncMutex<crate::namespace_state::NamespaceStateManager>>,
+    pub fn new(
+        config_manager: Arc<Mutex<crate::config::ConfigManager>>,
+        state_manager: Arc<Mutex<crate::namespace_state::NamespaceStateManager>>,
     ) -> Result<Self, SegwireError> {
         let (config_dir, namespace_prefix) = {
-            let manager = config_manager.lock().await;
+            let manager = config_manager.lock().unwrap();
             (
                 manager.config_directory().to_path_buf(),
                 manager.namespace_prefix().to_owned(),
@@ -42,125 +51,553 @@ impl DbusService {
 
         log_info!(ctx, "Initializing D-Bus service");
 
-        // Build D-Bus connection with service registration
-        // In simulation mode, use the session bus for unprivileged testing
+        // Connect to D-Bus
         let connection = if std::env::var("SEGWIRE_SIMULATION").is_ok() {
             log_info!(ctx, "Using session D-Bus (simulation mode)");
-            ConnectionBuilder::session()
+            Connection::new_session()
         } else {
-            ConnectionBuilder::system()
+            Connection::new_system()
         }
         .map_err(|e| {
-            let error_ctx = ErrorContext::new("dbus_connection_builder")
+            let error_ctx = ErrorContext::new("dbus_connection")
                 .with_field("service_name", interface::SERVICE_NAME)
                 .with_remediation("Ensure D-Bus system bus is available")
                 .with_remediation("Check that the daemon has permission to access the system bus");
-            SegwireError::DBus(e)
-                .with_context(error_ctx)
-                .log_and_return()
-        })?
-        .name(interface::SERVICE_NAME)
-        .map_err(|e| {
-            let error_ctx = ErrorContext::new("dbus_service_name_registration")
-                .with_field("service_name", interface::SERVICE_NAME)
-                .with_remediation("Ensure no other instance of segwire-daemon is running")
-                .with_remediation("Check D-Bus service configuration");
-            SegwireError::DBus(e)
-                .with_context(error_ctx)
-                .log_and_return()
-        })?
-        .build()
-        .await
-        .map_err(|e| {
-            let error_ctx = ErrorContext::new("dbus_connection_build")
-                .with_remediation("Ensure D-Bus system bus is running")
-                .with_remediation("Check system D-Bus configuration");
-            SegwireError::DBus(e)
+            SegwireError::DBus(e.to_string())
                 .with_context(error_ctx)
                 .log_and_return()
         })?;
 
-        let authorizer = crate::policykit::PolicyKitAuthorizer::new(connection.clone());
-
-        let connection_clone = connection.clone();
-
+        // Request the well-known service name
         connection
-            .object_server()
-            .at(
-                interface::OBJECT_PATH,
-                NamespaceManagerInterface {
-                    connection: connection_clone,
-                    config_manager: config_manager.clone(),
-                    state_manager: state_manager.clone(),
-                    daemon_start_time: SystemTime::now(),
-                    authorizer,
-                },
-            )
-            .await
+            .request_name(interface::SERVICE_NAME, false, true, false)
             .map_err(|e| {
-                let error_ctx = ErrorContext::new("dbus_object_registration")
-                    .with_field("object_path", interface::OBJECT_PATH)
-                    .with_remediation("Check D-Bus object path permissions");
-                SegwireError::DBus(e)
+                let error_ctx = ErrorContext::new("dbus_service_name_registration")
+                    .with_field("service_name", interface::SERVICE_NAME)
+                    .with_remediation("Ensure no other instance of segwire-daemon is running")
+                    .with_remediation("Check D-Bus service configuration");
+                SegwireError::DBus(e.to_string())
                     .with_context(error_ctx)
                     .log_and_return()
             })?;
+
+        // Build the PolicyKit authorizer
+        let authorizer = match crate::policykit::PolicyKitAuthorizer::new(&connection) {
+            Ok(auth) => Some(auth),
+            Err(e) => {
+                warn!("PolicyKit authorizer initialization failed: {}, authorization checks will use UID fallback", e);
+                None
+            }
+        };
+
+        // Set up crossroads for method dispatch
+        let mut cr = Crossroads::new();
+
+        // Allow processing of incoming messages by the crossroads dispatcher
+        cr.set_async_support(None);
+
+        let shared_state = Arc::new(Mutex::new(ServiceState {
+            config_manager: config_manager.clone(),
+            state_manager: state_manager.clone(),
+            daemon_start_time: SystemTime::now(),
+            authorizer,
+        }));
+
+        let iface_token = {
+            let state = shared_state.clone();
+            cr.register(interface::INTERFACE_NAME, move |b| {
+                // ── ListNamespaces ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "ListNamespaces",
+                        (),
+                        ("namespaces",),
+                        move |ctx, _cr: &mut (), ()| {
+                            debug!("D-Bus method call: ListNamespaces");
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "list", ctx)?;
+
+                            let prefix = {
+                                let config_mgr = svc.config_manager.lock().unwrap();
+                                config_mgr.namespace_prefix().to_owned()
+                            };
+
+                            let manager = svc.state_manager.lock().unwrap();
+                            let namespaces: Vec<(String, String, String, String)> = manager
+                                .get_all_states()
+                                .values()
+                                .map(|ns| {
+                                    (
+                                        ns.name.clone(),
+                                        ns.status.to_string(),
+                                        ns.config_path.clone(),
+                                        format!("Namespace managed by {}", prefix),
+                                    )
+                                })
+                                .collect();
+
+                            debug!("Returning {} namespaces", namespaces.len());
+                            Ok((namespaces,))
+                        },
+                    );
+                }
+
+                // ── GetNamespaceStatus ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "GetNamespaceStatus",
+                        ("name",),
+                        ("name", "full_name", "status", "config_path", "created_at", "last_updated"),
+                        move |ctx, _cr: &mut (), (name,): (String,)| {
+                            debug!("D-Bus method call: GetNamespaceStatus({})", name);
+
+                            if let Err(e) = interface_helpers::validate_namespace_name(&name) {
+                                warn!("Invalid namespace name '{}': {}", name, e.message());
+                                return Err(create_method_err(SegwireError::from(e)));
+                            }
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "status", ctx)?;
+
+                            let full_name = {
+                                let config_mgr = svc.config_manager.lock().unwrap();
+                                config_mgr.generate_full_namespace_name(&name)
+                            };
+
+                            let manager = svc.state_manager.lock().unwrap();
+                            match manager
+                                .get_namespace_state(&full_name)
+                                .or_else(|| manager.get_namespace_state(&name))
+                            {
+                                Some(namespace) => {
+                                    debug!(
+                                        "Found namespace '{}' with status '{}'",
+                                        name, namespace.status
+                                    );
+                                    Ok((
+                                        namespace.name.clone(),
+                                        namespace.full_name.clone(),
+                                        namespace.status.to_string(),
+                                        namespace.config_path.clone(),
+                                        namespace.created_at,
+                                        namespace.last_updated,
+                                    ))
+                                }
+                                None => {
+                                    warn!("Namespace '{}' not found", name);
+                                    Err(create_method_err(SegwireError::from(
+                                        DbusError::NamespaceNotFound(format!(
+                                            "Namespace '{}' not found",
+                                            name
+                                        )),
+                                    )))
+                                }
+                            }
+                        },
+                    );
+                }
+
+                // ── DeleteNamespace ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "DeleteNamespace",
+                        ("name",),
+                        ("success", "message", "details"),
+                        move |ctx, _cr: &mut (), (name,): (String,)| {
+                            debug!("D-Bus method call: DeleteNamespace({})", name);
+
+                            if let Err(e) = interface_helpers::validate_namespace_name(&name) {
+                                warn!("Invalid namespace name '{}': {}", name, e.message());
+                                return Err(create_method_err(SegwireError::from(e)));
+                            }
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "delete", ctx)?;
+
+                            match delete_namespace_by_name(&svc, &name) {
+                                Ok(()) => {
+                                    info!("Successfully deleted namespace '{}'", name);
+                                    let result = OperationResult::success(format!(
+                                        "Namespace '{}' deleted successfully",
+                                        name
+                                    ))
+                                    .with_detail("namespace".to_string(), name);
+                                    Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ))
+                                }
+                                Err(e) => {
+                                    warn!("Failed to delete namespace '{}': {:?}", name, e);
+                                    let result = OperationResult::failure(format!(
+                                        "Failed to delete namespace: {}",
+                                        e
+                                    ));
+                                    Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ))
+                                }
+                            }
+                        },
+                    );
+                }
+
+                // ── ReloadConfiguration ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "ReloadConfiguration",
+                        (),
+                        ("success", "message", "details"),
+                        move |ctx, _cr: &mut (), ()| {
+                            debug!("D-Bus method call: ReloadConfiguration");
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "reload", ctx)?;
+
+                            match reload_all_configurations(&svc) {
+                                Ok((loaded_count, error_count)) => {
+                                    info!(
+                                        "Configuration reload completed: {} loaded, {} errors",
+                                        loaded_count, error_count
+                                    );
+
+                                    let message = if error_count == 0 {
+                                        format!(
+                                            "Successfully reloaded {} configurations",
+                                            loaded_count
+                                        )
+                                    } else {
+                                        format!(
+                                            "Reloaded {} configurations with {} errors",
+                                            loaded_count, error_count
+                                        )
+                                    };
+
+                                    let result = OperationResult::success(message)
+                                        .with_detail(
+                                            "loaded_count".to_string(),
+                                            loaded_count.to_string(),
+                                        )
+                                        .with_detail(
+                                            "error_count".to_string(),
+                                            error_count.to_string(),
+                                        );
+                                    Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ))
+                                }
+                                Err(e) => {
+                                    warn!("Configuration reload failed: {:?}", e);
+                                    let result = OperationResult::failure(format!(
+                                        "Configuration reload failed: {}",
+                                        e
+                                    ));
+                                    Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ))
+                                }
+                            }
+                        },
+                    );
+                }
+
+                // ── ValidateConfiguration ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "ValidateConfiguration",
+                        ("config_path",),
+                        ("valid", "errors", "warnings"),
+                        move |ctx, _cr: &mut (), (config_path,): (String,)| {
+                            debug!(
+                                "D-Bus method call: ValidateConfiguration({})",
+                                config_path
+                            );
+
+                            if let Err(e) = interface_helpers::validate_config_path(&config_path) {
+                                warn!("Invalid config path '{}': {}", config_path, e.message());
+                                return Err(create_method_err(SegwireError::from(e)));
+                            }
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "validate", ctx)?;
+
+                            match validate_config_file(
+                                &svc,
+                                &std::path::PathBuf::from(&config_path),
+                            ) {
+                                Ok(result) => {
+                                    debug!(
+                                        "Configuration validation completed for '{}'",
+                                        config_path
+                                    );
+                                    Ok((result.valid, result.errors, result.warnings))
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Configuration validation failed for '{}': {:?}",
+                                        config_path, e
+                                    );
+                                    Ok((
+                                        false,
+                                        vec![format!("Validation failed: {}", e)],
+                                        Vec::<String>::new(),
+                                    ))
+                                }
+                            }
+                        },
+                    );
+                }
+
+                // ── GetDaemonStatus ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "GetDaemonStatus",
+                        (),
+                        ("version", "uptime", "managed_count", "active_count"),
+                        move |ctx, _cr: &mut (), ()| {
+                            debug!("D-Bus method call: GetDaemonStatus");
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "status", ctx)?;
+
+                            let uptime = svc
+                                .daemon_start_time
+                                .elapsed()
+                                .unwrap_or_default()
+                                .as_secs();
+
+                            let state_stats = {
+                                let mgr = svc.state_manager.lock().unwrap();
+                                mgr.get_state_stats()
+                            };
+                            let config_stats = {
+                                let mgr = svc.config_manager.lock().unwrap();
+                                mgr.get_config_stats()
+                            };
+
+                            let managed_count = config_stats.total_configs as u32;
+                            let active_count = state_stats.active_namespaces as u32;
+                            let version = env!("CARGO_PKG_VERSION").to_string();
+
+                            debug!(
+                                "Daemon status: version={}, uptime={}s, managed={}, active={}",
+                                version, uptime, managed_count, active_count
+                            );
+
+                            Ok((version, uptime, managed_count, active_count))
+                        },
+                    );
+                }
+
+                // ── RestartNamespace ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "RestartNamespace",
+                        ("name",),
+                        ("success", "message", "details"),
+                        move |ctx, _cr: &mut (), (name,): (String,)| {
+                            debug!("D-Bus method call: RestartNamespace({})", name);
+
+                            if let Err(e) = interface_helpers::validate_namespace_name(&name) {
+                                warn!("Invalid namespace name '{}': {}", name, e.message());
+                                return Err(create_method_err(SegwireError::from(e)));
+                            }
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "restart", ctx)?;
+
+                            // Look up the namespace configuration before deleting
+                            let config = {
+                                let config_mgr = svc.config_manager.lock().unwrap();
+                                let full_name =
+                                    config_mgr.generate_full_namespace_name(&name);
+                                config_mgr
+                                    .get_namespace_config(&full_name)
+                                    .or_else(|| config_mgr.get_namespace_config(&name))
+                                    .map(|entry| entry.config.clone())
+                            };
+
+                            let config = match config {
+                                Some(c) => c,
+                                None => {
+                                    let result = OperationResult::failure(format!(
+                                        "No configuration found for namespace '{}', cannot restart",
+                                        name
+                                    ));
+                                    return Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ));
+                                }
+                            };
+
+                            // Delete the existing namespace
+                            if let Err(e) = delete_namespace_by_name(&svc, &name) {
+                                warn!(
+                                    "Failed to delete namespace '{}' during restart: {:?}",
+                                    name, e
+                                );
+                                let result = OperationResult::failure(format!(
+                                    "Restart failed during deletion: {}",
+                                    e
+                                ));
+                                return Ok((
+                                    result.success,
+                                    result.message,
+                                    result.details,
+                                ));
+                            }
+
+                            // Recreate from config
+                            match create_namespace_from_config(&svc, config) {
+                                Ok(full_name) => {
+                                    info!("Successfully restarted namespace '{}'", full_name);
+                                    let result = OperationResult::success(format!(
+                                        "Namespace '{}' restarted successfully",
+                                        full_name
+                                    ));
+                                    Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ))
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to recreate namespace '{}' during restart: {:?}",
+                                        name, e
+                                    );
+                                    let result = OperationResult::failure(format!(
+                                        "Restart failed during recreation: {}",
+                                        e
+                                    ));
+                                    Ok((
+                                        result.success,
+                                        result.message,
+                                        result.details,
+                                    ))
+                                }
+                            }
+                        },
+                    );
+                }
+            })
+        };
+
+        // Register the object path with the crossroads dispatcher
+        cr.insert(interface::OBJECT_PATH, &[iface_token], ());
+
+        // Start serving — hand the crossroads dispatcher to the connection
+        connection.start_receive(
+            dbus::message::MatchRule::new_method_call(),
+            Box::new(move |msg, conn| {
+                cr.handle_message(msg, conn).unwrap();
+                true
+            }),
+        );
 
         log_info!(ctx, "D-Bus service registered successfully");
 
         Ok(Self { connection })
     }
 
+    /// Process incoming D-Bus messages for a given duration.
+    ///
+    /// Call this from the event loop to dispatch method calls. Returns when the
+    /// timeout expires or a message was processed.
+    pub fn process(&self, timeout: std::time::Duration) -> Result<(), SegwireError> {
+        self.connection
+            .process(timeout)
+            .map_err(|e| SegwireError::DBus(e.to_string()))?;
+        Ok(())
+    }
+
     /// Emit a namespace created signal
-    pub async fn emit_namespace_created(
+    pub fn emit_namespace_created(
         &self,
         name: &str,
         config_path: &str,
     ) -> Result<(), SegwireError> {
-        let _object_server = self.connection.object_server();
-
-        NamespaceManagerInterface::namespace_created(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            name,
-            config_path,
+        let signal = dbus::Message::new_signal(
+            interface::OBJECT_PATH,
+            interface::INTERFACE_NAME,
+            interface::SIGNAL_NAMESPACE_CREATED,
         )
-        .await?;
+        .map_err(SegwireError::DBus)?;
+
+        let signal = signal.append2(name, config_path);
+
+        self.connection
+            .channel()
+            .send(signal)
+            .map_err(|_| SegwireError::DBus("Failed to send signal".to_string()))?;
 
         debug!("Emitted NamespaceCreated signal for {}", name);
         Ok(())
     }
 
     /// Emit a namespace deleted signal
-    pub async fn emit_namespace_deleted(
-        &self,
-        name: &str,
-        reason: &str,
-    ) -> Result<(), SegwireError> {
-        NamespaceManagerInterface::namespace_deleted(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            name,
-            reason,
+    pub fn emit_namespace_deleted(&self, name: &str, reason: &str) -> Result<(), SegwireError> {
+        let signal = dbus::Message::new_signal(
+            interface::OBJECT_PATH,
+            interface::INTERFACE_NAME,
+            interface::SIGNAL_NAMESPACE_DELETED,
         )
-        .await?;
+        .map_err(SegwireError::DBus)?;
+
+        let signal = signal.append2(name, reason);
+
+        self.connection
+            .channel()
+            .send(signal)
+            .map_err(|_| SegwireError::DBus("Failed to send signal".to_string()))?;
 
         debug!("Emitted NamespaceDeleted signal for {}", name);
         Ok(())
     }
 
     /// Emit an operation progress signal
-    pub async fn emit_operation_progress(
+    pub fn emit_operation_progress(
         &self,
         operation: &str,
         progress: f64,
         message: &str,
     ) -> Result<(), SegwireError> {
-        NamespaceManagerInterface::operation_progress(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            operation,
-            progress,
-            message,
+        let signal = dbus::Message::new_signal(
+            interface::OBJECT_PATH,
+            interface::INTERFACE_NAME,
+            interface::SIGNAL_OPERATION_PROGRESS,
         )
-        .await?;
+        .map_err(SegwireError::DBus)?;
+
+        let signal = signal.append3(operation, progress, message);
+
+        self.connection
+            .channel()
+            .send(signal)
+            .map_err(|_| SegwireError::DBus("Failed to send signal".to_string()))?;
 
         debug!(
             "Emitted OperationProgress signal: {} - {:.1}% - {}",
@@ -172,19 +609,25 @@ impl DbusService {
     }
 
     /// Emit a namespace status changed signal
-    pub async fn emit_namespace_status_changed(
+    pub fn emit_namespace_status_changed(
         &self,
         name: &str,
         old_status: &str,
         new_status: &str,
     ) -> Result<(), SegwireError> {
-        NamespaceManagerInterface::namespace_status_changed(
-            &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-            name,
-            old_status,
-            new_status,
+        let signal = dbus::Message::new_signal(
+            interface::OBJECT_PATH,
+            interface::INTERFACE_NAME,
+            interface::SIGNAL_NAMESPACE_STATUS_CHANGED,
         )
-        .await?;
+        .map_err(SegwireError::DBus)?;
+
+        let signal = signal.append3(name, old_status, new_status);
+
+        self.connection
+            .channel()
+            .send(signal)
+            .map_err(|_| SegwireError::DBus("Failed to send signal".to_string()))?;
 
         debug!(
             "Emitted NamespaceStatusChanged signal for {}: {} -> {}",
@@ -194,740 +637,274 @@ impl DbusService {
     }
 }
 
-/// D-Bus interface implementation
-struct NamespaceManagerInterface {
-    connection: Connection,
-    config_manager: Arc<AsyncMutex<crate::config::ConfigManager>>,
-    state_manager: Arc<AsyncMutex<crate::namespace_state::NamespaceStateManager>>,
-    daemon_start_time: SystemTime,
-    authorizer: crate::policykit::PolicyKitAuthorizer,
-}
+// ─── Free functions used by method handlers ───
 
-impl NamespaceManagerInterface {
-    async fn emit_error(&self, error_type: &str, message: &str, namespace: &str) {
-        if let Ok(ctx) = SignalContext::new(&self.connection, interface::OBJECT_PATH) {
-            if let Err(e) = Self::error_occurred(&ctx, error_type, message, namespace).await {
-                warn!("Failed to emit ErrorOccurred signal: {:?}", e);
-            }
-        }
-    }
-}
+/// Check authorization for a D-Bus method call
+fn check_authorization(
+    svc: &ServiceState,
+    action: &str,
+    ctx: &mut dbus_crossroads::Context,
+) -> Result<(), dbus_crossroads::MethodErr> {
+    let sender = ctx
+        .message()
+        .sender()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
 
-#[zbus::dbus_interface(name = "org.segwire.NamespaceManager")]
-impl NamespaceManagerInterface {
-    /// List all managed namespaces with basic information
-    async fn list_namespaces(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-    ) -> zbus::fdo::Result<method_signatures::ListNamespacesResult> {
-        debug!("D-Bus method call: ListNamespaces");
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("list", &header).await {
-            warn!("Authorization failed for ListNamespaces: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        let prefix = {
-            let config_mgr = self.config_manager.lock().await;
-            config_mgr.namespace_prefix().to_owned()
-        };
-
-        let manager = self.state_manager.lock().await;
-        let namespaces: Vec<_> = manager
-            .get_all_states()
-            .values()
-            .map(|ns| {
-                (
-                    ns.name.clone(),
-                    ns.status.to_string(),
-                    ns.config_path.clone(),
-                    format!("Namespace managed by {}", prefix),
-                )
+    if let Some(ref authorizer) = svc.authorizer {
+        authorizer
+            .check_authorization(action, &sender)
+            .map_err(|e| {
+                warn!("Authorization failed for {}: {:?}", action, e);
+                create_method_err(e)
             })
-            .collect();
-
-        debug!("Returning {} namespaces", namespaces.len());
-        Ok(namespaces)
-    }
-
-    /// Get detailed status information for a specific namespace
-    async fn get_namespace_status(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-        name: String,
-    ) -> zbus::fdo::Result<method_signatures::GetNamespaceStatusResult> {
-        debug!("D-Bus method call: GetNamespaceStatus({})", name);
-
-        // Validate input
-        if let Err(e) = interface_helpers::validate_namespace_name(&name) {
-            warn!("Invalid namespace name '{}': {}", name, e.message());
-            return Err(create_fdo_error(SegwireError::from(e)));
-        }
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("status", &header).await {
-            warn!("Authorization failed for GetNamespaceStatus: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        let full_name = {
-            let config_mgr = self.config_manager.lock().await;
-            config_mgr.generate_full_namespace_name(&name)
-        };
-
-        let manager = self.state_manager.lock().await;
-        match manager
-            .get_namespace_state(&full_name)
-            .or_else(|| manager.get_namespace_state(&name))
-        {
-            Some(namespace) => {
-                debug!(
-                    "Found namespace '{}' with status '{}'",
-                    name, namespace.status
-                );
-                Ok(namespace.clone())
-            }
-            None => {
-                warn!("Namespace '{}' not found", name);
-                Err(create_fdo_error(SegwireError::from(
-                    DbusError::NamespaceNotFound(format!("Namespace '{}' not found", name)),
-                )))
-            }
-        }
-    }
-
-    /// Delete a managed namespace
-    async fn delete_namespace(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-        name: String,
-    ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
-        debug!("D-Bus method call: DeleteNamespace({})", name);
-
-        // Validate input
-        if let Err(e) = interface_helpers::validate_namespace_name(&name) {
-            warn!("Invalid namespace name '{}': {}", name, e.message());
-            return Err(create_fdo_error(SegwireError::from(e)));
-        }
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("delete", &header).await {
-            warn!("Authorization failed for DeleteNamespace: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        // Delete the namespace
-        match self.delete_namespace_by_name(&name).await {
-            Ok(()) => {
-                info!("Successfully deleted namespace '{}'", name);
-                Ok(
-                    OperationResult::success(format!("Namespace '{}' deleted successfully", name))
-                        .with_detail("namespace".to_string(), name),
-                )
-            }
-            Err(e) => {
-                warn!("Failed to delete namespace '{}': {:?}", name, e);
-                self.emit_error("DeletionError", &e.to_string(), &name)
-                    .await;
-                Ok(OperationResult::failure(format!(
-                    "Failed to delete namespace: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    /// Reload all configuration files and update namespaces
-    async fn reload_configuration(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-    ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
-        debug!("D-Bus method call: ReloadConfiguration");
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("reload", &header).await {
-            warn!("Authorization failed for ReloadConfiguration: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        // Reload configuration files
-        match self.reload_all_configurations().await {
-            Ok((loaded_count, error_count)) => {
-                info!(
-                    "Configuration reload completed: {} loaded, {} errors",
-                    loaded_count, error_count
-                );
-
-                if let Err(e) = NamespaceManagerInterface::configuration_reloaded(
-                    &SignalContext::new(&self.connection, interface::OBJECT_PATH)?,
-                    loaded_count,
-                    error_count,
-                )
-                .await
-                {
-                    warn!("Failed to emit configuration_reloaded signal: {:?}", e);
-                }
-
-                let message = if error_count == 0 {
-                    format!("Successfully reloaded {} configurations", loaded_count)
-                } else {
-                    format!(
-                        "Reloaded {} configurations with {} errors",
-                        loaded_count, error_count
-                    )
-                };
-
-                Ok(OperationResult::success(message)
-                    .with_detail("loaded_count".to_string(), loaded_count.to_string())
-                    .with_detail("error_count".to_string(), error_count.to_string()))
-            }
-            Err(e) => {
-                warn!("Configuration reload completed with errors: {:?}", e);
-                self.emit_error("ReloadError", &e.to_string(), "").await;
-                Ok(OperationResult::failure(format!(
-                    "Configuration reload failed: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    /// Validate a configuration file without applying it
-    async fn validate_configuration(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-        config_path: String,
-    ) -> zbus::fdo::Result<method_signatures::ConfigValidationResult> {
-        debug!("D-Bus method call: ValidateConfiguration({})", config_path);
-
-        // Validate input
-        if let Err(e) = interface_helpers::validate_config_path(&config_path) {
-            warn!("Invalid config path '{}': {}", config_path, e.message());
-            return Err(create_fdo_error(SegwireError::from(e)));
-        }
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("validate", &header).await {
-            warn!("Authorization failed for ValidateConfiguration: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        // Validate the configuration file
-        match self
-            .validate_config_file(&std::path::PathBuf::from(&config_path))
-            .await
-        {
-            Ok(validation_result) => {
-                debug!("Configuration validation completed for '{}'", config_path);
-                Ok(validation_result)
-            }
-            Err(e) => {
-                warn!(
-                    "Configuration validation failed for '{}': {:?}",
-                    config_path, e
-                );
-                Ok(ValidationResult {
-                    valid: false,
-                    errors: vec![format!("Validation failed: {}", e)],
-                    warnings: vec![],
-                })
-            }
-        }
-    }
-
-    /// Get daemon status and statistics
-    async fn get_daemon_status(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-    ) -> zbus::fdo::Result<method_signatures::DaemonStatusResult> {
-        debug!("D-Bus method call: GetDaemonStatus");
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("status", &header).await {
-            warn!("Authorization failed for GetDaemonStatus: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        let uptime = self
-            .daemon_start_time
-            .elapsed()
-            .unwrap_or_default()
-            .as_secs();
-
-        // Get stats from state_manager and config_manager
-        let state_stats = {
-            let mgr = self.state_manager.lock().await;
-            mgr.get_state_stats()
-        };
-        let config_stats = {
-            let mgr = self.config_manager.lock().await;
-            mgr.get_config_stats()
-        };
-
-        let managed_count = config_stats.total_configs as u32;
-        let active_count = state_stats.active_namespaces as u32;
-
-        let version = env!("CARGO_PKG_VERSION").to_string();
-
-        debug!(
-            "Daemon status: version={}, uptime={}s, managed={}, active={}, total_tracked={}",
-            version, uptime, managed_count, active_count, state_stats.total_namespaces
-        );
-
-        Ok((version, uptime, managed_count, active_count))
-    }
-
-    /// Restart a specific namespace (delete and recreate)
-    async fn restart_namespace(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-        name: String,
-    ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
-        debug!("D-Bus method call: RestartNamespace({})", name);
-
-        // Validate input
-        if let Err(e) = interface_helpers::validate_namespace_name(&name) {
-            warn!("Invalid namespace name '{}': {}", name, e.message());
-            return Err(create_fdo_error(SegwireError::from(e)));
-        }
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("restart", &header).await {
-            warn!("Authorization failed for RestartNamespace: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        // Look up the namespace configuration before deleting
-        let config = {
-            let config_mgr = self.config_manager.lock().await;
-            let full_name = config_mgr.generate_full_namespace_name(&name);
-            config_mgr
-                .get_namespace_config(&full_name)
-                .or_else(|| config_mgr.get_namespace_config(&name))
-                .map(|entry| entry.config.clone())
-        };
-
-        let config = match config {
-            Some(c) => c,
-            None => {
-                return Ok(OperationResult::failure(format!(
-                    "No configuration found for namespace '{}', cannot restart",
-                    name
-                )));
-            }
-        };
-
-        // Delete the existing namespace
-        if let Err(e) = self.delete_namespace_by_name(&name).await {
-            warn!(
-                "Failed to delete namespace '{}' during restart: {:?}",
-                name, e
-            );
-            return Ok(OperationResult::failure(format!(
-                "Restart failed during deletion: {}",
-                e
-            )));
-        }
-
-        // Recreate from config
-        match self.create_namespace_from_config(config).await {
-            Ok(full_name) => {
-                info!("Successfully restarted namespace '{}'", full_name);
-                Ok(OperationResult::success(format!(
-                    "Namespace '{}' restarted successfully",
-                    full_name
-                )))
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to recreate namespace '{}' during restart: {:?}",
-                    name, e
-                );
-                Ok(OperationResult::failure(format!(
-                    "Restart failed during recreation: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    /// D-Bus signal definitions
-    #[dbus_interface(signal)]
-    async fn namespace_created(
-        ctx: &SignalContext<'_>,
-        name: &str,
-        config_path: &str,
-    ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn namespace_deleted(
-        ctx: &SignalContext<'_>,
-        name: &str,
-        reason: &str,
-    ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn configuration_reloaded(
-        ctx: &SignalContext<'_>,
-        count: u32,
-        errors: u32,
-    ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn operation_progress(
-        ctx: &SignalContext<'_>,
-        operation: &str,
-        progress: f64,
-        message: &str,
-    ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn namespace_status_changed(
-        ctx: &SignalContext<'_>,
-        name: &str,
-        old_status: &str,
-        new_status: &str,
-    ) -> zbus::Result<()>;
-
-    #[dbus_interface(signal)]
-    async fn error_occurred(
-        ctx: &SignalContext<'_>,
-        error_type: &str,
-        message: &str,
-        namespace: &str,
-    ) -> zbus::Result<()>;
-}
-
-impl NamespaceManagerInterface {
-    async fn check_authorization(
-        &self,
-        action: &str,
-        header: &zbus::MessageHeader<'_>,
-    ) -> Result<(), SegwireError> {
-        let sender_result = header.sender().map_err(SegwireError::DBus)?;
-        let sender = sender_result
-            .ok_or_else(|| SegwireError::Permission("Unknown D-Bus sender".to_string()))?;
-
-        self.authorizer.check_authorization(action, sender).await
-    }
-
-    /// Load and parse a namespace configuration file
-    async fn load_namespace_config(
-        &self,
-        config_path: &std::path::Path,
-    ) -> Result<segwire_common::NamespaceConfig, SegwireError> {
-        use segwire_common::NamespaceConfig;
-        use std::fs;
-
-        debug!("Loading namespace config from: {}", config_path.display());
-
-        // Read the configuration file
-        let config_content = fs::read_to_string(config_path).map_err(SegwireError::System)?;
-
-        // Parse the TOML configuration
-        let config: NamespaceConfig = toml::from_str(&config_content).map_err(|e| {
-            SegwireError::Config(segwire_common::error::ConfigError::InvalidToml(e))
-        })?;
-
-        debug!(
-            "Successfully loaded config for namespace: {}",
-            config.namespace.name
-        );
-        Ok(config)
-    }
-
-    /// Create a namespace from a parsed configuration
-    async fn create_namespace_from_config(
-        &self,
-        config: segwire_common::NamespaceConfig,
-    ) -> Result<String, SegwireError> {
-        use crate::netlink::NetlinkManager;
-
-        let full_name = {
-            let config_mgr = self.config_manager.lock().await;
-            config_mgr.generate_full_namespace_name(&config.namespace.name)
-        };
-
-        debug!("Creating namespace '{}' from configuration", full_name);
-
-        // Create the network namespace using netlink
-        let netlink_manager = NetlinkManager::new()?;
-        netlink_manager.create_namespace(&full_name)?;
-
-        // Look up the config path from the config manager
-        let config_path = {
-            let config_mgr = self.config_manager.lock().await;
-            config_mgr
-                .get_namespace_config(&full_name)
-                .map(|entry| entry.file_path.clone())
-                .unwrap_or_default()
-        };
-
-        // Create namespace state for tracking
-        let namespace_state = NamespaceState::new(
-            config.namespace.name.clone(),
-            full_name.clone(),
-            config_path,
-        );
-
-        // Add to managed namespaces
-        {
-            let mut manager = self.state_manager.lock().await;
-            manager.update_namespace_state(namespace_state);
-        }
-
-        info!("Successfully created namespace '{}'", full_name);
-        Ok(full_name)
-    }
-
-    /// Delete a namespace by name
-    async fn delete_namespace_by_name(&self, name: &str) -> Result<(), SegwireError> {
-        use crate::netlink::NetlinkManager;
-
-        let full_name = {
-            let config_mgr = self.config_manager.lock().await;
-            config_mgr.generate_full_namespace_name(name)
-        };
-
-        // Check if namespace exists in our managed set
-        {
-            let manager = self.state_manager.lock().await;
-            if manager.get_namespace_state(name).is_none()
-                && manager.get_namespace_state(&full_name).is_none()
-            {
-                return Err(SegwireError::Network(format!(
-                    "Namespace '{}' not found",
-                    name
-                )));
-            }
-        }
-
-        debug!("Deleting namespace '{}'", full_name);
-
-        // Delete the network namespace using netlink
-        let netlink_manager = NetlinkManager::new()?;
-        netlink_manager.delete_namespace(&full_name)?;
-
-        // Remove from managed namespaces
-        {
-            let mut manager = self.state_manager.lock().await;
-            manager.remove_namespace_state(name);
-            manager.remove_namespace_state(&full_name);
-        }
-
-        info!("Successfully deleted namespace '{}'", full_name);
+    } else {
         Ok(())
     }
+}
 
-    /// Reload all configuration files and return counts
-    async fn reload_all_configurations(&self) -> Result<(u32, u32), SegwireError> {
-        debug!("Starting configuration reload process");
+/// Create a dbus-crossroads MethodErr from a SegwireError
+fn create_method_err(error: SegwireError) -> dbus_crossroads::MethodErr {
+    let dbus_error = DbusError::from(error);
+    dbus_crossroads::MethodErr::failed(&dbus_error.message().to_string())
+}
 
-        // Get the configuration directory
-        let config_dir = {
-            let manager = self.config_manager.lock().await;
-            manager.config_directory().to_path_buf()
-        };
+/// Load and parse a namespace configuration file
+fn load_namespace_config(
+    config_path: &std::path::Path,
+) -> Result<segwire_common::NamespaceConfig, SegwireError> {
+    use segwire_common::NamespaceConfig;
+    use std::fs;
 
-        // Scan for configuration files
-        let config_files = self.scan_config_directory(&config_dir).await?;
-        let total_files = config_files.len() as u32;
-        let mut loaded_count = 0u32;
-        let mut error_count = 0u32;
+    debug!("Loading namespace config from: {}", config_path.display());
 
-        debug!("Found {} configuration files to process", total_files);
+    let config_content = fs::read_to_string(config_path).map_err(SegwireError::System)?;
 
-        // Process each configuration file
-        for (index, config_file) in config_files.iter().enumerate() {
-            let progress = (index as f64) / (total_files as f64);
+    let config: NamespaceConfig = toml::from_str(&config_content).map_err(|e| {
+        SegwireError::Config(segwire_common::error::ConfigError::InvalidToml(e))
+    })?;
 
-            // Emit progress signal
-            if let Err(e) = self
-                .emit_progress_signal(
-                    "reload_configuration",
-                    progress,
-                    &format!("Processing {}", config_file.display()),
-                )
-                .await
-            {
-                warn!("Failed to emit progress signal: {:?}", e);
-            }
+    debug!(
+        "Successfully loaded config for namespace: {}",
+        config.namespace.name
+    );
+    Ok(config)
+}
 
-            // Try to load and validate the configuration
-            match self.load_namespace_config(config_file).await {
-                Ok(_config) => {
-                    loaded_count += 1;
-                    debug!("Successfully loaded config: {}", config_file.display());
-                }
-                Err(e) => {
-                    error_count += 1;
-                    warn!("Failed to load config {}: {:?}", config_file.display(), e);
-                }
-            }
-        }
+/// Create a namespace from configuration
+fn create_namespace_from_config(
+    svc: &ServiceState,
+    config: segwire_common::NamespaceConfig,
+) -> Result<String, SegwireError> {
+    use crate::netlink::NetlinkManager;
 
-        // Emit completion signal
-        if let Err(e) = self
-            .emit_progress_signal(
-                "reload_configuration",
-                1.0,
-                "Configuration reload completed",
-            )
-            .await
-        {
-            warn!("Failed to emit completion signal: {:?}", e);
-        }
+    let full_name = {
+        let config_mgr = svc.config_manager.lock().unwrap();
+        config_mgr.generate_full_namespace_name(&config.namespace.name)
+    };
 
-        info!(
-            "Configuration reload completed: {} loaded, {} errors",
-            loaded_count, error_count
-        );
-        Ok((loaded_count, error_count))
+    debug!("Creating namespace '{}' from configuration", full_name);
+
+    let netlink_manager = NetlinkManager::new()?;
+    netlink_manager.create_namespace(&full_name)?;
+
+    let config_path = {
+        let config_mgr = svc.config_manager.lock().unwrap();
+        config_mgr
+            .get_namespace_config(&full_name)
+            .map(|entry| entry.file_path.clone())
+            .unwrap_or_default()
+    };
+
+    let namespace_state = NamespaceState::new(
+        config.namespace.name.clone(),
+        full_name.clone(),
+        config_path,
+    );
+
+    {
+        let mut manager = svc.state_manager.lock().unwrap();
+        manager.update_namespace_state(namespace_state);
     }
 
-    /// Scan configuration directory for TOML files
-    async fn scan_config_directory(
-        &self,
-        config_dir: &std::path::Path,
-    ) -> Result<Vec<std::path::PathBuf>, SegwireError> {
-        use std::fs;
+    info!("Successfully created namespace '{}'", full_name);
+    Ok(full_name)
+}
 
-        debug!("Scanning configuration directory: {}", config_dir.display());
+/// Delete a namespace by name
+fn delete_namespace_by_name(svc: &ServiceState, name: &str) -> Result<(), SegwireError> {
+    use crate::netlink::NetlinkManager;
 
-        if !config_dir.exists() {
-            return Err(SegwireError::System(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "Configuration directory not found: {}",
-                    config_dir.display()
-                ),
+    let full_name = {
+        let config_mgr = svc.config_manager.lock().unwrap();
+        config_mgr.generate_full_namespace_name(name)
+    };
+
+    {
+        let manager = svc.state_manager.lock().unwrap();
+        if manager.get_namespace_state(name).is_none()
+            && manager.get_namespace_state(&full_name).is_none()
+        {
+            return Err(SegwireError::Network(format!(
+                "Namespace '{}' not found",
+                name
             )));
         }
-
-        let mut config_files = Vec::new();
-
-        let entries = fs::read_dir(config_dir).map_err(SegwireError::System)?;
-
-        for entry in entries {
-            let entry = entry.map_err(SegwireError::System)?;
-            let path = entry.path();
-
-            // Only process .toml files
-            if path.is_file() && path.extension().is_some_and(|ext| ext == "toml") {
-                config_files.push(path);
-            }
-        }
-
-        config_files.sort();
-        debug!("Found {} configuration files", config_files.len());
-        Ok(config_files)
     }
 
-    /// Validate a configuration file and return validation result
-    async fn validate_config_file(
-        &self,
-        config_path: &std::path::Path,
-    ) -> Result<ValidationResult, SegwireError> {
-        debug!("Validating configuration file: {}", config_path.display());
+    debug!("Deleting namespace '{}'", full_name);
 
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
+    let netlink_manager = NetlinkManager::new()?;
+    netlink_manager.delete_namespace(&full_name)?;
 
-        // Check if file exists and is readable
-        if !config_path.exists() {
-            errors.push(format!(
-                "Configuration file does not exist: {}",
-                config_path.display()
-            ));
-            return Ok(ValidationResult {
+    {
+        let mut manager = svc.state_manager.lock().unwrap();
+        manager.remove_namespace_state(name);
+        manager.remove_namespace_state(&full_name);
+    }
+
+    info!("Successfully deleted namespace '{}'", full_name);
+    Ok(())
+}
+
+/// Reload all configuration files and return counts
+fn reload_all_configurations(svc: &ServiceState) -> Result<(u32, u32), SegwireError> {
+    debug!("Starting configuration reload process");
+
+    let config_dir = {
+        let manager = svc.config_manager.lock().unwrap();
+        manager.config_directory().to_path_buf()
+    };
+
+    let config_files = scan_config_directory(&config_dir)?;
+    let total_files = config_files.len() as u32;
+    let mut loaded_count = 0u32;
+    let mut error_count = 0u32;
+
+    debug!("Found {} configuration files to process", total_files);
+
+    for config_file in config_files.iter() {
+        match load_namespace_config(config_file) {
+            Ok(_config) => {
+                loaded_count += 1;
+                debug!("Successfully loaded config: {}", config_file.display());
+            }
+            Err(e) => {
+                error_count += 1;
+                warn!("Failed to load config {}: {:?}", config_file.display(), e);
+            }
+        }
+    }
+
+    info!(
+        "Configuration reload completed: {} loaded, {} errors",
+        loaded_count, error_count
+    );
+    Ok((loaded_count, error_count))
+}
+
+/// Scan configuration directory for TOML files
+fn scan_config_directory(
+    config_dir: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, SegwireError> {
+    use std::fs;
+
+    debug!("Scanning configuration directory: {}", config_dir.display());
+
+    if !config_dir.exists() {
+        return Err(SegwireError::System(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Configuration directory not found: {}",
+                config_dir.display()
+            ),
+        )));
+    }
+
+    let mut config_files = Vec::new();
+
+    let entries = fs::read_dir(config_dir).map_err(SegwireError::System)?;
+
+    for entry in entries {
+        let entry = entry.map_err(SegwireError::System)?;
+        let path = entry.path();
+
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "toml") {
+            config_files.push(path);
+        }
+    }
+
+    config_files.sort();
+    debug!("Found {} configuration files", config_files.len());
+    Ok(config_files)
+}
+
+/// Validate a configuration file and return validation result
+fn validate_config_file(
+    _svc: &ServiceState,
+    config_path: &std::path::Path,
+) -> Result<ValidationResult, SegwireError> {
+    debug!("Validating configuration file: {}", config_path.display());
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    if !config_path.exists() {
+        errors.push(format!(
+            "Configuration file does not exist: {}",
+            config_path.display()
+        ));
+        return Ok(ValidationResult {
+            valid: false,
+            errors,
+            warnings,
+        });
+    }
+
+    match load_namespace_config(config_path) {
+        Ok(config) => {
+            debug!(
+                "Configuration syntax is valid for: {}",
+                config.namespace.name
+            );
+
+            if let Err(e) = config.validate() {
+                errors.push(e.to_string());
+            }
+
+            if config.interfaces.move_interfaces.is_empty()
+                && config.interfaces.virtual_interfaces.is_empty()
+            {
+                warnings.push("No interfaces specified for namespace".to_string());
+            }
+
+            if config.dns.servers.is_empty() {
+                warnings.push("No DNS servers specified".to_string());
+            }
+
+            let is_valid = errors.is_empty();
+            debug!(
+                "Configuration validation result: valid={}, errors={}, warnings={}",
+                is_valid,
+                errors.len(),
+                warnings.len()
+            );
+
+            Ok(ValidationResult {
+                valid: is_valid,
+                errors,
+                warnings,
+            })
+        }
+        Err(e) => {
+            errors.push(format!("Configuration parsing failed: {}", e));
+            Ok(ValidationResult {
                 valid: false,
                 errors,
                 warnings,
-            });
-        }
-
-        // Try to load and parse the configuration
-        match self.load_namespace_config(config_path).await {
-            Ok(config) => {
-                debug!(
-                    "Configuration syntax is valid for: {}",
-                    config.namespace.name
-                );
-
-                // Perform semantic validation
-                if let Err(e) = config.validate() {
-                    errors.push(e.to_string());
-                }
-
-                // Advisory warnings (valid config, but potentially incomplete)
-                if config.interfaces.move_interfaces.is_empty()
-                    && config.interfaces.virtual_interfaces.is_empty()
-                {
-                    warnings.push("No interfaces specified for namespace".to_string());
-                }
-
-                if config.dns.servers.is_empty() {
-                    warnings.push("No DNS servers specified".to_string());
-                }
-
-                let is_valid = errors.is_empty();
-                debug!(
-                    "Configuration validation result: valid={}, errors={}, warnings={}",
-                    is_valid,
-                    errors.len(),
-                    warnings.len()
-                );
-
-                Ok(ValidationResult {
-                    valid: is_valid,
-                    errors,
-                    warnings,
-                })
-            }
-            Err(e) => {
-                errors.push(format!("Configuration parsing failed: {}", e));
-                Ok(ValidationResult {
-                    valid: false,
-                    errors,
-                    warnings,
-                })
-            }
+            })
         }
     }
-
-    /// Emit a progress signal for long-running operations
-    async fn emit_progress_signal(
-        &self,
-        operation: &str,
-        progress: f64,
-        message: &str,
-    ) -> Result<(), SegwireError> {
-        debug!(
-            "Progress: {} - {:.1}% - {}",
-            operation,
-            progress * 100.0,
-            message
-        );
-
-        let signal_ctx = SignalContext::new(&self.connection, interface::OBJECT_PATH)
-            .map_err(SegwireError::DBus)?;
-
-        if let Err(e) =
-            NamespaceManagerInterface::operation_progress(&signal_ctx, operation, progress, message)
-                .await
-        {
-            warn!("Failed to emit OperationProgress signal: {}", e);
-        }
-
-        Ok(())
-    }
-}
-
-/// Helper function to create D-Bus errors from SegwireError
-fn create_fdo_error(error: SegwireError) -> zbus::fdo::Error {
-    let dbus_error = segwire_common::dbus::DbusError::from(error);
-    zbus::fdo::Error::Failed(dbus_error.message().to_string())
 }
 
 #[cfg(test)]
@@ -936,31 +913,25 @@ mod tests {
     use segwire_common::error::ConfigError;
 
     #[test]
-    fn test_create_fdo_error() {
+    fn test_create_method_err() {
         let err = SegwireError::Config(ConfigError::InvalidToml(
             toml::from_str::<toml::Value>("invalid = [").unwrap_err(),
         ));
-        let fdo_err = create_fdo_error(err);
-        match fdo_err {
-            zbus::fdo::Error::Failed(msg) => {
-                assert!(msg.contains("Invalid TOML syntax"));
-            }
-            _ => panic!("Expected Failed error"),
-        }
+        let method_err = create_method_err(err);
+        // MethodErr implements Display
+        let msg = format!("{}", method_err);
+        assert!(!msg.is_empty());
     }
 
     #[test]
-    fn test_create_fdo_error_generic() {
+    fn test_create_method_err_generic() {
         let err = SegwireError::System(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "file missing",
         ));
-        let fdo_err = create_fdo_error(err);
-        match fdo_err {
-            zbus::fdo::Error::Failed(msg) => {
-                assert!(msg.contains("file missing"));
-            }
-            _ => panic!("Expected Failed error"),
-        }
+        let method_err = create_method_err(err);
+        let msg = format!("{}", method_err);
+        assert!(msg.contains("file missing"));
     }
 }
+

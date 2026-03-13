@@ -6,8 +6,7 @@ description = "Shared library for segwire network namespace management system"
 
 [dependencies]
 # D-Bus communication types
-zbus = { workspace = true }
-zvariant.workspace = true
+dbus = { workspace = true }
 
 # Configuration parsing
 toml = { workspace = true }
@@ -23,8 +22,6 @@ regex = { workspace = true }
 # Security (uid checks)
 nix = { workspace = true }
 
-# Byte handling
-libc = "0.2"
 
 # Logging
 tracing = { workspace = true }

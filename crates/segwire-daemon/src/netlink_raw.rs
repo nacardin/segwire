@@ -1,55 +1,124 @@
 //! Low-level netlink socket helpers.
 //!
-//! This module owns **all** netlink protocol interactions via `netlink-tpc`'s
-//! high-level `NetlinkSocket` API:
-//! - Async operations use the shared `NetlinkSocket` held by `NetlinkManager`
-//! - Sync operations (inside namespace thread closures) spin up a thread-local
-//!   monoio runtime and open a fresh `NetlinkSocket`
+//! This module owns **all** netlink protocol interactions:
+//! - Sync operations use a raw blocking `AF_NETLINK` socket via `nix`
+//! - Message serialization/deserialization uses `netlink-packet-core` +
+//!   `netlink-packet-route`
 //!
 //! Namespace lifecycle syscalls (`unshare`, `setns`, `mount`, etc.) live in the
-//! companion [`crate::netns_raw`] module.  This file contains **zero** `nix`
-//! imports and **zero** manual netlink serialization — everything goes through
-//! `NetlinkSocket::request()`.
+//! companion [`crate::netns_raw`] module.  This file contains **zero** manual
+//! netlink serialization — everything goes through the `netlink-packet-*`
+//! crates for message building/parsing.
 
-use segwire_common::netlink::NetlinkError;
 use crate::netns_raw;
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST,
 };
 use netlink_packet_route::{
-    link::{
-        InfoData, InfoKind, InfoVeth, LinkAttribute, LinkInfo, LinkMessage,
-    },
+    link::{InfoData, InfoKind, InfoVeth, LinkAttribute, LinkInfo, LinkMessage},
     route::{
-        RouteAddress, RouteAttribute, RouteHeader, RouteMessage,
-        RouteProtocol, RouteScope, RouteType,
+        RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
+        RouteType,
     },
     AddressFamily, RouteNetlinkMessage,
 };
-use netlink_tpc::{NetlinkProtocol, NetlinkSocket};
+use segwire_common::netlink::NetlinkError;
 use std::net::Ipv4Addr;
+use std::os::fd::{AsRawFd, OwnedFd};
 
 // ---------------------------------------------------------------------------
-// Sync netlink socket (for use inside namespace thread closures)
+// Raw blocking netlink socket
 // ---------------------------------------------------------------------------
 
-/// Send a netlink message and collect all response messages using a fresh
-/// `NetlinkSocket` inside a thread-local monoio runtime.
+/// Open a raw `AF_NETLINK` / `NETLINK_ROUTE` socket bound to the kernel.
+fn open_netlink_socket() -> Result<OwnedFd, NetlinkError> {
+    use nix::sys::socket::{
+        bind, socket, AddressFamily, NetlinkAddr, SockFlag, SockProtocol, SockType,
+    };
+
+    let fd = socket(
+        AddressFamily::Netlink,
+        SockType::Datagram,
+        SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkRoute,
+    )
+    .map_err(|e| NetlinkError::SocketError(format!("socket() failed: {}", e)))?;
+
+    // Bind to PID 0 (kernel auto-assigns) and multicast groups 0
+    let addr = NetlinkAddr::new(0, 0);
+    bind(fd.as_raw_fd(), &addr)
+        .map_err(|e| NetlinkError::SocketError(format!("bind() failed: {}", e)))?;
+
+    Ok(fd)
+}
+
+/// Send a netlink message and collect all responses using a raw blocking socket.
 fn sync_netlink_request(
     msg: NetlinkMessage<RouteNetlinkMessage>,
 ) -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, NetlinkError> {
-    let mut socket = NetlinkSocket::open(NetlinkProtocol::Route)
-        .map_err(|e| NetlinkError::SocketError(format!("socket creation failed: {}", e)))?;
+    let fd = open_netlink_socket()?;
 
-    let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-        .build()
-        .map_err(|e| NetlinkError::SocketError(format!("monoio runtime failed: {}", e)))?;
+    // Serialize message
+    let mut buf = vec![0u8; msg.header.length as usize];
+    msg.serialize(&mut buf);
 
-    rt.block_on(async {
-        socket.request(msg).await.map_err(|e| {
-            NetlinkError::ProtocolError(format!("netlink request: {}", e))
-        })
-    })
+    // Send
+    nix::sys::socket::send(fd.as_raw_fd(), &buf, nix::sys::socket::MsgFlags::empty())
+        .map_err(|e| NetlinkError::SocketError(format!("send() failed: {}", e)))?;
+
+    // Receive responses
+    let mut responses = Vec::new();
+    let mut recv_buf = vec![0u8; 65536];
+
+    loop {
+        let n = nix::sys::socket::recv(
+            fd.as_raw_fd(),
+            &mut recv_buf,
+            nix::sys::socket::MsgFlags::empty(),
+        )
+        .map_err(|e| NetlinkError::SocketError(format!("recv() failed: {}", e)))?;
+
+        if n == 0 {
+            break;
+        }
+
+        let mut offset = 0;
+        while offset < n {
+            let msg_buf = &recv_buf[offset..n];
+            let parsed: NetlinkMessage<RouteNetlinkMessage> = NetlinkMessage::deserialize(msg_buf)
+                .map_err(|e| NetlinkError::ProtocolError(format!("deserialize failed: {}", e)))?;
+
+            let len = parsed.header.length as usize;
+            if len == 0 {
+                // Avoid infinite loop on zero-length messages
+                break;
+            }
+
+            match &parsed.payload {
+                NetlinkPayload::Done(_) => {
+                    return Ok(responses);
+                }
+                NetlinkPayload::Error(err_msg) => {
+                    // Error code None means ACK (success), Some(code) is actual error
+                    if let Some(code) = err_msg.code {
+                        return Err(NetlinkError::ProtocolError(format!(
+                            "netlink error: code {}",
+                            code.get()
+                        )));
+                    }
+                    // ACK — we're done for non-dump requests
+                    return Ok(responses);
+                }
+                _ => {
+                    responses.push(parsed);
+                }
+            }
+
+            offset += len;
+        }
+    }
+
+    Ok(responses)
 }
 
 // ---------------------------------------------------------------------------
@@ -79,11 +148,10 @@ pub(crate) fn get_interface_index_fresh(name: &str) -> Result<u32, String> {
 /// sends the SetLink, closes everything.
 pub(crate) fn move_interface_to_default_ns(interface_name: &str) -> Result<(), String> {
     let responses = dump_links_sync().map_err(|e| e.to_string())?;
-    let ifindex =
-        extract_interface_index(&responses, interface_name).map_err(|e| e.to_string())?;
+    let ifindex = extract_interface_index(&responses, interface_name).map_err(|e| e.to_string())?;
 
-    let default_ns_fd =
-        netns_raw::open_ns_fd("/proc/1/ns/net").map_err(|e| format!("open default ns fd: {}", e))?;
+    let default_ns_fd = netns_raw::open_ns_fd("/proc/1/ns/net")
+        .map_err(|e| format!("open default ns fd: {}", e))?;
 
     let mut msg = LinkMessage::default();
     msg.header.index = ifindex;
@@ -238,8 +306,7 @@ pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
 
     let mut routes = Vec::new();
     for resp in responses {
-        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route_msg)) =
-            resp.payload
+        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route_msg)) = resp.payload
         {
             routes.push(format_route(&route_msg));
         }
@@ -251,8 +318,7 @@ pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-
-/// Send a link dump request via a fresh socket with a thread-local runtime.
+/// Send a link dump request via a fresh socket.
 fn dump_links_sync() -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, NetlinkError> {
     let msg = LinkMessage::default();
 
@@ -264,9 +330,7 @@ fn dump_links_sync() -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, Netlink
 }
 
 /// Extract interface names from a link dump response.
-fn extract_interface_names(
-    responses: &[NetlinkMessage<RouteNetlinkMessage>],
-) -> Vec<String> {
+fn extract_interface_names(responses: &[NetlinkMessage<RouteNetlinkMessage>]) -> Vec<String> {
     let mut names = Vec::new();
     for resp in responses {
         if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) = &resp.payload {
@@ -309,28 +373,24 @@ pub(crate) fn format_route(route: &RouteMessage) -> String {
 
     for attr in &route.attributes {
         match attr {
-            RouteAttribute::Destination(addr) => {
-                match addr {
-                    RouteAddress::Inet(ip) => {
-                        dest = format!("{}/{}", ip, route.header.destination_prefix_length);
-                    }
-                    RouteAddress::Inet6(ip) => {
-                        dest = format!("{}/{}", ip, route.header.destination_prefix_length);
-                    }
-                    _ => {}
+            RouteAttribute::Destination(addr) => match addr {
+                RouteAddress::Inet(ip) => {
+                    dest = format!("{}/{}", ip, route.header.destination_prefix_length);
                 }
-            }
-            RouteAttribute::Gateway(addr) => {
-                match addr {
-                    RouteAddress::Inet(ip) => {
-                        gateway = format!("via {}", ip);
-                    }
-                    RouteAddress::Inet6(ip) => {
-                        gateway = format!("via {}", ip);
-                    }
-                    _ => {}
+                RouteAddress::Inet6(ip) => {
+                    dest = format!("{}/{}", ip, route.header.destination_prefix_length);
                 }
-            }
+                _ => {}
+            },
+            RouteAttribute::Gateway(addr) => match addr {
+                RouteAddress::Inet(ip) => {
+                    gateway = format!("via {}", ip);
+                }
+                RouteAddress::Inet6(ip) => {
+                    gateway = format!("via {}", ip);
+                }
+                _ => {}
+            },
             RouteAttribute::Oif(idx) => {
                 oif = *idx;
             }
@@ -364,12 +424,14 @@ mod tests {
     fn test_format_route() {
         let mut msg = RouteMessage::default();
         msg.header.destination_prefix_length = 24;
-        msg.attributes.push(RouteAttribute::Destination(
-            RouteAddress::Inet(Ipv4Addr::new(192, 168, 1, 0)),
-        ));
-        msg.attributes.push(RouteAttribute::Gateway(
-            RouteAddress::Inet(Ipv4Addr::new(10, 0, 0, 1)),
-        ));
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet(
+                Ipv4Addr::new(192, 168, 1, 0),
+            )));
+        msg.attributes
+            .push(RouteAttribute::Gateway(RouteAddress::Inet(Ipv4Addr::new(
+                10, 0, 0, 1,
+            ))));
         msg.attributes.push(RouteAttribute::Priority(100));
 
         let formatted = format_route(&msg);

@@ -11,10 +11,7 @@ segwire-cli = { path = "../segwire-cli" }
 segwire-common = { path = "../segwire-common" }
 
 # D-Bus
-zbus = { workspace = true }
-
-# Async runtime (same as daemon)
-monoio = { workspace = true }
+dbus = { workspace = true }
 
 # Test utilities
 tempfile = "3.8"
