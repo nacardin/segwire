@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-
 /// Namespace state information for D-Bus communication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceState {

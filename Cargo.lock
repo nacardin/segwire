@@ -779,6 +779,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dbus",
+ "nix 0.27.1",
  "segwire-cli",
  "segwire-common",
  "segwire-daemon",

@@ -26,9 +26,19 @@ use tracing::{debug, error, info, warn};
 /// Events sent from background threads to the main loop for D-Bus signal emission.
 #[derive(Debug)]
 enum DaemonEvent {
-    Created { name: String, source: String },
-    Deleted { name: String, source: String },
-    StatusChanged { name: String, old_status: String, new_status: String },
+    Created {
+        name: String,
+        source: String,
+    },
+    Deleted {
+        name: String,
+        source: String,
+    },
+    StatusChanged {
+        name: String,
+        old_status: String,
+        new_status: String,
+    },
 }
 
 /// Main daemon event loop coordinator
@@ -94,10 +104,7 @@ impl DaemonEventLoop {
             .with_field("config_dir", config_dir.display().to_string());
 
         // Initialize D-Bus service (not Arc — stays on the main thread)
-        let dbus_service = DbusService::new(
-            config_manager.clone(),
-            state_manager.clone(),
-        )?;
+        let dbus_service = DbusService::new(config_manager.clone(), state_manager.clone())?;
         log_info!(ctx, "D-Bus service initialized successfully");
 
         // Create shutdown signal
@@ -141,7 +148,8 @@ impl DaemonEventLoop {
         let (event_tx, event_rx) = std::sync::mpsc::channel::<DaemonEvent>();
 
         // Spawn configuration monitoring thread
-        let config_thread = self.spawn_config_monitoring_thread(config_event_receiver, event_tx.clone());
+        let config_thread =
+            self.spawn_config_monitoring_thread(config_event_receiver, event_tx.clone());
 
         // Spawn state synchronization thread
         let state_thread = self.spawn_state_synchronization_thread(event_tx);
@@ -170,7 +178,10 @@ impl DaemonEventLoop {
             }
 
             // Process D-Bus messages for up to 100ms
-            if let Err(e) = self.dbus_service.process(std::time::Duration::from_millis(100)) {
+            if let Err(e) = self
+                .dbus_service
+                .process(std::time::Duration::from_millis(100))
+            {
                 warn!("Error processing D-Bus messages: {}", e);
             }
 
@@ -179,17 +190,34 @@ impl DaemonEventLoop {
                 match event {
                     DaemonEvent::Created { name, source } => {
                         if let Err(e) = self.dbus_service.emit_namespace_created(&name, &source) {
-                            warn!("Failed to emit namespace created signal for {}: {}", name, e);
+                            warn!(
+                                "Failed to emit namespace created signal for {}: {}",
+                                name, e
+                            );
                         }
                     }
                     DaemonEvent::Deleted { name, source } => {
                         if let Err(e) = self.dbus_service.emit_namespace_deleted(&name, &source) {
-                            warn!("Failed to emit namespace deleted signal for {}: {}", name, e);
+                            warn!(
+                                "Failed to emit namespace deleted signal for {}: {}",
+                                name, e
+                            );
                         }
                     }
-                    DaemonEvent::StatusChanged { name, old_status, new_status } => {
-                        if let Err(e) = self.dbus_service.emit_namespace_status_changed(&name, &old_status, &new_status) {
-                            warn!("Failed to emit namespace status changed signal for {}: {}", name, e);
+                    DaemonEvent::StatusChanged {
+                        name,
+                        old_status,
+                        new_status,
+                    } => {
+                        if let Err(e) = self.dbus_service.emit_namespace_status_changed(
+                            &name,
+                            &old_status,
+                            &new_status,
+                        ) {
+                            warn!(
+                                "Failed to emit namespace status changed signal for {}: {}",
+                                name, e
+                            );
                         }
                     }
                 }
@@ -265,9 +293,7 @@ impl DaemonEventLoop {
 
                     // Trigger immediate state synchronization for affected namespaces
                     if !affected_namespaces.is_empty() {
-                        debug!(
-                            "Configuration change detected, triggering state synchronization"
-                        );
+                        debug!("Configuration change detected, triggering state synchronization");
 
                         let config_mgr = config_manager.lock().unwrap();
                         let mut state_mgr = state_manager.lock().unwrap();
@@ -537,6 +563,16 @@ impl DaemonEventLoop {
 
         info!("Graceful shutdown completed");
         Ok(())
+    }
+
+    /// Get a reference to the config manager for test inspection.
+    pub fn config_manager(&self) -> &Arc<Mutex<ConfigManager>> {
+        &self.config_manager
+    }
+
+    /// Get a reference to the state manager for test inspection.
+    pub fn state_manager(&self) -> &Arc<Mutex<NamespaceStateManager>> {
+        &self.state_manager
     }
 
     /// Request shutdown from external signal

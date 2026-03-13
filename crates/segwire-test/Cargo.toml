@@ -26,5 +26,8 @@ anyhow = { workspace = true }
 # Configuration parsing
 toml = { workspace = true }
 
+# Syscall wrappers
+nix = { workspace = true }
+
 # Test serialization (daemon tests share a D-Bus name)
 serial_test = "3"

@@ -51,9 +51,11 @@ impl DbusService {
 
         log_info!(ctx, "Initializing D-Bus service");
 
-        // Connect to D-Bus
-        let connection = if std::env::var("SEGWIRE_SIMULATION").is_ok() {
-            log_info!(ctx, "Using session D-Bus (simulation mode)");
+        // Connect to D-Bus — use session bus in simulation or test mode
+        let use_session_bus = std::env::var("SEGWIRE_TEST_SESSION_BUS").is_ok();
+
+        let connection = if use_session_bus {
+            log_info!(ctx, "Using session D-Bus (simulation/test mode)");
             Connection::new_session()
         } else {
             Connection::new_system()
@@ -68,12 +70,17 @@ impl DbusService {
                 .log_and_return()
         })?;
 
-        // Request the well-known service name
+        // Request the well-known service name from the config
+        let service_name = {
+            let manager = config_manager.lock().unwrap();
+            manager.dbus_service_name().to_owned()
+        };
+
         connection
-            .request_name(interface::SERVICE_NAME, false, true, false)
+            .request_name(&service_name, false, true, false)
             .map_err(|e| {
                 let error_ctx = ErrorContext::new("dbus_service_name_registration")
-                    .with_field("service_name", interface::SERVICE_NAME)
+                    .with_field("service_name", &service_name)
                     .with_remediation("Ensure no other instance of segwire-daemon is running")
                     .with_remediation("Check D-Bus service configuration");
                 SegwireError::DBus(e.to_string())
@@ -150,7 +157,14 @@ impl DbusService {
                     b.method(
                         "GetNamespaceStatus",
                         ("name",),
-                        ("name", "full_name", "status", "config_path", "created_at", "last_updated"),
+                        (
+                            "name",
+                            "full_name",
+                            "status",
+                            "config_path",
+                            "created_at",
+                            "last_updated",
+                        ),
                         move |ctx, _cr: &mut (), (name,): (String,)| {
                             debug!("D-Bus method call: GetNamespaceStatus({})", name);
 
@@ -228,11 +242,7 @@ impl DbusService {
                                         name
                                     ))
                                     .with_detail("namespace".to_string(), name);
-                                    Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ))
+                                    Ok((result.success, result.message, result.details))
                                 }
                                 Err(e) => {
                                     warn!("Failed to delete namespace '{}': {:?}", name, e);
@@ -240,11 +250,7 @@ impl DbusService {
                                         "Failed to delete namespace: {}",
                                         e
                                     ));
-                                    Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ))
+                                    Ok((result.success, result.message, result.details))
                                 }
                             }
                         },
@@ -293,11 +299,7 @@ impl DbusService {
                                             "error_count".to_string(),
                                             error_count.to_string(),
                                         );
-                                    Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ))
+                                    Ok((result.success, result.message, result.details))
                                 }
                                 Err(e) => {
                                     warn!("Configuration reload failed: {:?}", e);
@@ -305,11 +307,7 @@ impl DbusService {
                                         "Configuration reload failed: {}",
                                         e
                                     ));
-                                    Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ))
+                                    Ok((result.success, result.message, result.details))
                                 }
                             }
                         },
@@ -324,10 +322,7 @@ impl DbusService {
                         ("config_path",),
                         ("valid", "errors", "warnings"),
                         move |ctx, _cr: &mut (), (config_path,): (String,)| {
-                            debug!(
-                                "D-Bus method call: ValidateConfiguration({})",
-                                config_path
-                            );
+                            debug!("D-Bus method call: ValidateConfiguration({})", config_path);
 
                             if let Err(e) = interface_helpers::validate_config_path(&config_path) {
                                 warn!("Invalid config path '{}': {}", config_path, e.message());
@@ -430,8 +425,7 @@ impl DbusService {
                             // Look up the namespace configuration before deleting
                             let config = {
                                 let config_mgr = svc.config_manager.lock().unwrap();
-                                let full_name =
-                                    config_mgr.generate_full_namespace_name(&name);
+                                let full_name = config_mgr.generate_full_namespace_name(&name);
                                 config_mgr
                                     .get_namespace_config(&full_name)
                                     .or_else(|| config_mgr.get_namespace_config(&name))
@@ -445,11 +439,7 @@ impl DbusService {
                                         "No configuration found for namespace '{}', cannot restart",
                                         name
                                     ));
-                                    return Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ));
+                                    return Ok((result.success, result.message, result.details));
                                 }
                             };
 
@@ -463,11 +453,7 @@ impl DbusService {
                                     "Restart failed during deletion: {}",
                                     e
                                 ));
-                                return Ok((
-                                    result.success,
-                                    result.message,
-                                    result.details,
-                                ));
+                                return Ok((result.success, result.message, result.details));
                             }
 
                             // Recreate from config
@@ -478,11 +464,7 @@ impl DbusService {
                                         "Namespace '{}' restarted successfully",
                                         full_name
                                     ));
-                                    Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ))
+                                    Ok((result.success, result.message, result.details))
                                 }
                                 Err(e) => {
                                     warn!(
@@ -493,11 +475,7 @@ impl DbusService {
                                         "Restart failed during recreation: {}",
                                         e
                                     ));
-                                    Ok((
-                                        result.success,
-                                        result.message,
-                                        result.details,
-                                    ))
+                                    Ok((result.success, result.message, result.details))
                                 }
                             }
                         },
@@ -680,9 +658,8 @@ fn load_namespace_config(
 
     let config_content = fs::read_to_string(config_path).map_err(SegwireError::System)?;
 
-    let config: NamespaceConfig = toml::from_str(&config_content).map_err(|e| {
-        SegwireError::Config(segwire_common::error::ConfigError::InvalidToml(e))
-    })?;
+    let config: NamespaceConfig = toml::from_str(&config_content)
+        .map_err(|e| SegwireError::Config(segwire_common::error::ConfigError::InvalidToml(e)))?;
 
     debug!(
         "Successfully loaded config for namespace: {}",
@@ -934,4 +911,3 @@ mod tests {
         assert!(msg.contains("file missing"));
     }
 }
-

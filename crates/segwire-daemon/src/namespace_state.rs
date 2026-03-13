@@ -125,9 +125,9 @@ impl NamespaceStateManager {
 
     /// Add or update a namespace state
     pub fn update_namespace_state(&mut self, state: NamespaceState) {
-        let name = state.name.clone();
-        debug!("Updating namespace state: {}", name);
-        self.namespace_states.insert(name, state);
+        let key = state.full_name.clone();
+        debug!("Updating namespace state: {}", key);
+        self.namespace_states.insert(key, state);
     }
 
     /// Remove a namespace state
@@ -710,7 +710,6 @@ pub struct StateStats {
     pub deleting_namespaces: usize,
     pub _last_sync: SystemTime,
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -1,14 +1,15 @@
 //! Test harness for integration tests.
 //!
-//! Creates a temporary configuration directory, sets environment variables for
-//! simulation mode, starts the daemon event loop in-process, and provides a
-//! `DbusClient` to run CLI operations against it.
+//! Creates a temporary configuration directory, optionally launches a private
+//! D-Bus session, starts the daemon event loop in-process, and provides
+//! helpers for writing namespace configs.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use segwire_common::DaemonConfig;
 use segwire_daemon::event_loop::DaemonEventLoop;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -16,7 +17,7 @@ use tempfile::TempDir;
 /// Global test counter for unique D-Bus service names.
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Test harness that manages a simulated daemon instance.
+/// Test harness that manages a daemon instance.
 pub struct TestHarness {
     /// Temporary directory containing daemon and namespace configs.
     pub config_dir: TempDir,
@@ -24,17 +25,48 @@ pub struct TestHarness {
     pub config_path: PathBuf,
     /// Shutdown flag for the daemon.
     shutdown_flag: Arc<AtomicBool>,
+    /// PID of the private dbus-daemon, if we launched one.
+    dbus_pid: Option<u32>,
 }
 
 impl TestHarness {
-    /// Create a new test harness with an empty configuration.
+    /// Create a new test harness.
     ///
-    /// Sets `SEGWIRE_SIMULATION=1` and `SEGWIRE_TEST_SESSION_BUS=1` so
-    /// the daemon uses session D-Bus and simulated netlink.
+    /// Sets `SEGWIRE_TEST_SESSION_BUS=1` so the daemon uses session D-Bus.
+    /// If `DBUS_SESSION_BUS_ADDRESS` is not set (e.g. under `sudo`), a
+    /// private `dbus-daemon` is launched automatically.
+    ///
+    /// **Note**: this does NOT set `SEGWIRE_SIMULATION`. The test must set
+    /// that itself if it wants simulation mode.
     pub fn new() -> Result<Self> {
-        // Ensure env vars are set BEFORE any daemon component initialises
-        std::env::set_var("SEGWIRE_SIMULATION", "1");
         std::env::set_var("SEGWIRE_TEST_SESSION_BUS", "1");
+
+        // Launch a private dbus-daemon for test isolation.
+        // Use --fork so the daemon backgrounds itself after printing the address.
+        // We record the PID for cleanup in Drop.
+        let output = Command::new("dbus-daemon")
+            .args(["--session", "--fork", "--print-address", "--print-pid"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .context("Failed to launch dbus-daemon (is dbus installed?)")?;
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let mut lines = output_str.lines();
+        let address = lines
+            .next()
+            .context("dbus-daemon did not print address")?
+            .trim()
+            .to_string();
+        let pid: u32 = lines
+            .next()
+            .context("dbus-daemon did not print PID")?
+            .trim()
+            .parse()
+            .context("dbus-daemon printed invalid PID")?;
+
+        std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address);
+        let dbus_pid = Some(pid);
 
         let config_dir = TempDir::new()?;
         let config_path = config_dir.path().join("daemon.toml");
@@ -49,7 +81,7 @@ impl TestHarness {
         writeln!(
             f,
             r#"[daemon]
-namespace_prefix = "test-"
+namespace_prefix = "test"
 config_dir = "{}"
 log_level = "debug"
 sync_interval_seconds = 30
@@ -68,6 +100,7 @@ object_path = "{}"
             config_dir,
             config_path,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            dbus_pid,
         })
     }
 
@@ -108,6 +141,17 @@ object_path = "{}"
     /// Request a shutdown.
     pub fn request_shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for TestHarness {
+    fn drop(&mut self) {
+        if let Some(pid) = self.dbus_pid {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
     }
 }
 

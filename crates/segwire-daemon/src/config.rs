@@ -169,6 +169,11 @@ impl ConfigManager {
         &self.daemon_config.daemon.config_dir
     }
 
+    /// Get the D-Bus service name for this daemon instance
+    pub fn dbus_service_name(&self) -> &str {
+        &self.daemon_config.dbus.service_name
+    }
+
     /// Get all currently loaded namespace configurations
     pub fn namespace_configs(&self) -> &HashMap<String, NamespaceConfigEntry> {
         &self.namespace_configs

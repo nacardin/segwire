@@ -47,11 +47,7 @@ impl PolicyKitAuthorizer {
         })
     }
 
-    pub fn check_authorization(
-        &self,
-        action: &str,
-        sender: &str,
-    ) -> Result<(), SegwireError> {
+    pub fn check_authorization(&self, action: &str, sender: &str) -> Result<(), SegwireError> {
         debug!("Checking PolicyKit authorization for action: {}", action);
 
         // Get the PolicyKit action ID for this operation
@@ -121,11 +117,7 @@ impl PolicyKitAuthorizer {
             .map_err(|e| SegwireError::DBus(format!("Failed to get sender PID: {}", e)))?;
 
         let (uid,): (u32,) = proxy
-            .method_call(
-                "org.freedesktop.DBus",
-                "GetConnectionUnixUser",
-                (sender,),
-            )
+            .method_call("org.freedesktop.DBus", "GetConnectionUnixUser", (sender,))
             .map_err(|e| SegwireError::DBus(format!("Failed to get sender UID: {}", e)))?;
 
         debug!("Sender '{}' has PID {} and UID {}", sender, pid, uid);

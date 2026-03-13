@@ -86,11 +86,8 @@ impl DbusClient {
         let proxy = connection.with_proxy(SERVICE_NAME, OBJECT_PATH, Duration::from_secs(5));
 
         // Try to call Introspect to verify the service is available
-        let result: Result<(String,), _> = proxy.method_call(
-            "org.freedesktop.DBus.Introspectable",
-            "Introspect",
-            (),
-        );
+        let result: Result<(String,), _> =
+            proxy.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ());
 
         match result {
             Ok(_) => {
@@ -104,11 +101,8 @@ impl DbusClient {
     /// Check if the daemon service is currently available
     pub fn is_service_available(&self) -> bool {
         let proxy = self.proxy();
-        let result: Result<(String,), _> = proxy.method_call(
-            "org.freedesktop.DBus.Introspectable",
-            "Introspect",
-            (),
-        );
+        let result: Result<(String,), _> =
+            proxy.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ());
         match result {
             Ok(_) => true,
             Err(e) => {
@@ -150,9 +144,9 @@ impl DbusClient {
             .method_call(INTERFACE_NAME, "GetNamespaceStatus", (name,))
             .context("Failed to get namespace status")?;
 
-        let namespace_status = status.parse().unwrap_or(
-            segwire_common::dbus::NamespaceStatus::Failed,
-        );
+        let namespace_status = status
+            .parse()
+            .unwrap_or(segwire_common::dbus::NamespaceStatus::Failed);
 
         Ok(NamespaceState {
             name: ns_name,
