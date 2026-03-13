@@ -1196,21 +1196,7 @@ impl NetlinkManager {
     // -----------------------------------------------------------------------
 
     fn validate_namespace_name(&self, name: &str) -> SegwireResult<()> {
-        if name.is_empty() {
-            return Err(
-                NetlinkError::InvalidName("namespace name cannot be empty".to_string()).into(),
-            );
-        }
-        if name.len() > 255 {
-            return Err(NetlinkError::InvalidName("namespace name too long".to_string()).into());
-        }
-        if name.contains('/') || name.contains('\0') {
-            return Err(NetlinkError::InvalidName(
-                "namespace name cannot contain '/' or null".to_string(),
-            )
-            .into());
-        }
-        Ok(())
+        crate::utils::validate_namespace_name(name)
     }
 
     fn validate_interface_name(&self, name: &str) -> SegwireResult<()> {

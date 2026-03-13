@@ -113,10 +113,16 @@ pub fn sample_namespace_config(name: &str) -> String {
     format!(
         r#"[namespace]
 name = "{name}"
-enabled = true
+description = "Test namespace"
 
-[network]
-mode = "isolated"
+[interfaces]
+move_interfaces = []
+virtual_interfaces = []
+
+[routing]
+
+[dns]
+servers = ["8.8.8.8"]
 "#
     )
 }

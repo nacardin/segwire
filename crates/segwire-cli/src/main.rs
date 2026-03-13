@@ -12,12 +12,9 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse();
 
-    // Handle validate command with syntax-only flag specially
-    if let Commands::Validate(ref args) = cli.command {
-        if args.syntax_only {
-            // For syntax-only validation, we don't need a D-Bus connection
-            return commands::validate::execute_syntax_only((*args).clone()).await;
-        }
+    // Handle validate command — runs entirely locally, no D-Bus needed
+    if let Commands::Validate(args) = cli.command {
+        return commands::validate::execute(args).await;
     }
 
     // Create D-Bus client for all other operations
@@ -40,6 +37,6 @@ async fn main() -> Result<()> {
         Commands::List(args) => commands::list::execute(client, args).await,
         Commands::Reload(args) => commands::reload::execute(client, args).await,
         Commands::Restart(args) => commands::restart::execute(client, args).await,
-        Commands::Validate(args) => commands::validate::execute(client, args).await,
+        Commands::Validate(_) => unreachable!("handled above"),
     }
 }

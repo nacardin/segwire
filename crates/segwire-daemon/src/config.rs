@@ -147,19 +147,9 @@ impl ConfigManager {
         &self.daemon_config.daemon.namespace_prefix
     }
 
-    /// Get the namespace prefix for this daemon instance (alternative method name)
-    pub fn get_namespace_prefix(&self) -> String {
-        self.daemon_config.daemon.namespace_prefix.clone()
-    }
-
     /// Get the configuration directory path
     pub fn config_directory(&self) -> &Path {
         &self.daemon_config.daemon.config_dir
-    }
-
-    /// Get the configuration directory path (alternative method name)
-    pub fn get_config_dir(&self) -> PathBuf {
-        self.daemon_config.daemon.config_dir.clone()
     }
 
     /// Get all currently loaded namespace configurations
@@ -814,7 +804,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "test");
 
-        let config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
+        let config_manager =
+            ConfigManager::new(config_path).expect("Failed to create config manager");
 
         assert_eq!(config_manager.namespace_prefix(), "test");
         assert_eq!(
@@ -860,7 +851,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "segwire");
 
-        let config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
+        let config_manager =
+            ConfigManager::new(config_path).expect("Failed to create config manager");
 
         // Test exact prefix match
         assert!(config_manager.matches_namespace_prefix("segwire"));
@@ -882,7 +874,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "segwire");
 
-        let config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
+        let config_manager =
+            ConfigManager::new(config_path).expect("Failed to create config manager");
 
         // Test name that doesn't have prefix
         assert_eq!(
@@ -908,7 +901,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let config_path = create_test_daemon_config(&temp_dir, "test");
 
-        let _config_manager = ConfigManager::new(config_path).expect("Failed to create config manager");
+        let _config_manager =
+            ConfigManager::new(config_path).expect("Failed to create config manager");
     }
 
     #[test]
@@ -1007,7 +1001,8 @@ mod tests {
 
         // Create a non-TOML file that should be ignored
         let non_toml_path = temp_dir.path().join("namespaces").join("readme.txt");
-        fs::write(&non_toml_path, "This is not a TOML file").expect("Failed to write non-TOML file");
+        fs::write(&non_toml_path, "This is not a TOML file")
+            .expect("Failed to write non-TOML file");
 
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
@@ -1203,7 +1198,8 @@ mod tests {
     APP_NAME = "newapp"
     "#;
 
-        fs::write(&new_config_path, updated_config_content).expect("Failed to write updated config");
+        fs::write(&new_config_path, updated_config_content)
+            .expect("Failed to write updated config");
 
         let event = ConfigFileEvent::Modified(new_config_path.clone());
         let result = config_manager
@@ -1233,5 +1229,4 @@ mod tests {
         assert_eq!(result[0], "test-newapp");
         assert!(config_manager.get_namespace_config("test-newapp").is_none());
     }
-
 }

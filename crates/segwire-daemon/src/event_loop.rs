@@ -16,23 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-/// Check if the daemon has the required capabilities
-fn check_capabilities() -> SegwireResult<()> {
-    use nix::unistd::Uid;
-
-    // Check if running as root or with CAP_SYS_ADMIN
-    if !Uid::effective().is_root() {
-        // In a full implementation, we would check for CAP_SYS_ADMIN capability
-        // For now, we'll just warn and continue
-        warn!("Daemon is not running as root - some operations may fail");
-        warn!("Ensure the daemon has CAP_SYS_ADMIN capability for namespace operations");
-    } else {
-        info!("Daemon running with root privileges");
-    }
-
-    Ok(())
-}
-
 /// Main daemon event loop coordinator
 ///
 /// This struct coordinates between different daemon components:
@@ -40,6 +23,14 @@ fn check_capabilities() -> SegwireResult<()> {
 /// - D-Bus service for CLI communication
 /// - Namespace state management and synchronization
 /// - Graceful shutdown handling with cleanup
+///
+/// # Lock Ordering
+///
+/// When acquiring multiple locks, always lock in this order to prevent deadlocks:
+/// 1. `config_manager`
+/// 2. `state_manager`
+///
+/// Never hold `state_manager` while acquiring `config_manager`.
 #[derive(Clone)]
 pub struct DaemonEventLoop {
     config_manager: Arc<Mutex<ConfigManager>>,
@@ -61,8 +52,7 @@ impl DaemonEventLoop {
 
         log_info!(ctx, "Initializing daemon event loop");
 
-        // Check for required capabilities
-        check_capabilities()?;
+        // Note: Capability/privilege checks are done in main() before reaching here.
 
         // Initialize configuration manager
         let config_manager = Arc::new(Mutex::new(ConfigManager::new(config_path.clone())?));
@@ -75,7 +65,10 @@ impl DaemonEventLoop {
         // Get configuration values for logging
         let (config_dir, namespace_prefix) = {
             let manager = config_manager.lock().await;
-            (manager.get_config_dir(), manager.get_namespace_prefix())
+            (
+                manager.config_directory().to_path_buf(),
+                manager.namespace_prefix().to_owned(),
+            )
         };
 
         let ctx = ctx
@@ -670,12 +663,5 @@ object_path = "/org/segwire/NamespaceManager"
                 println!("Expected error in test environment: {}", e);
             }
         }
-    }
-
-    #[test]
-    fn test_check_capabilities() {
-        // Test that capability checking doesn't panic
-        let result = check_capabilities();
-        assert!(result.is_ok());
     }
 }

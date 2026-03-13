@@ -1,28 +1,8 @@
-use crate::dbus_client::DbusClient;
 use anyhow::Result;
 use clap::Args;
+use segwire_common::config::NamespaceConfig;
+use serde::Serialize;
 use std::path::PathBuf;
-
-/// Trait for D-Bus client operations needed by validate command
-#[allow(dead_code)] // Used via generic validate_configurations<T> internally
-trait ValidateDbusClient {
-    async fn is_service_available(&self) -> bool;
-}
-
-impl ValidateDbusClient for DbusClient {
-    async fn is_service_available(&self) -> bool {
-        DbusClient::is_service_available(self).await
-    }
-}
-
-/// Dummy D-Bus client for syntax-only validation
-struct DummyDbusClient;
-
-impl ValidateDbusClient for DummyDbusClient {
-    async fn is_service_available(&self) -> bool {
-        false
-    }
-}
 
 /// Arguments for the validate command
 #[derive(Args, Clone)]
@@ -44,10 +24,6 @@ pub struct ValidateArgs {
     #[arg(short, long)]
     pub warnings: bool,
 
-    /// Validate syntax only, skip semantic validation
-    #[arg(long)]
-    pub syntax_only: bool,
-
     /// Continue validation even after finding errors
     #[arg(long)]
     pub continue_on_error: bool,
@@ -56,35 +32,11 @@ pub struct ValidateArgs {
 #[derive(clap::ValueEnum, Clone)]
 pub enum OutputFormat {
     Human,
-    Json,
-    Yaml,
+    Toml,
 }
 
-/// Execute the validate command with syntax-only mode (no D-Bus client needed)
-pub async fn execute_syntax_only(args: ValidateArgs) -> Result<()> {
-    // Create a dummy client that won't be used
-    let dummy_client = DummyDbusClient;
-    validate_configurations(&dummy_client, &args).await
-}
-
-/// Execute the validate command
-pub async fn execute(client: DbusClient, args: ValidateArgs) -> Result<()> {
-    // Note: Validation can work without daemon for syntax checking
-    // But semantic validation may require daemon connection
-
-    if !args.syntax_only && !client.is_service_available().await {
-        eprintln!("Warning: segwire daemon is not running");
-        eprintln!("Only syntax validation will be performed");
-        eprintln!("Start segwire-daemon for full semantic validation");
-    }
-
-    validate_configurations(&client, &args).await
-}
-
-async fn validate_configurations<T: ValidateDbusClient>(
-    client: &T,
-    args: &ValidateArgs,
-) -> Result<()> {
+/// Execute the validate command (no D-Bus client needed — all validation is local)
+pub async fn execute(args: ValidateArgs) -> Result<()> {
     let mut validation_results = Vec::new();
     let total_files;
     let mut error_count = 0;
@@ -110,9 +62,8 @@ async fn validate_configurations<T: ValidateDbusClient>(
     };
 
     if path.is_file() {
-        // Validate single file
         total_files = 1;
-        let result = validate_single_file(&path, client, args).await?;
+        let result = validate_single_file(&path, &args);
         if result.has_errors {
             error_count += 1;
         }
@@ -121,12 +72,11 @@ async fn validate_configurations<T: ValidateDbusClient>(
         }
         validation_results.push(result);
     } else if path.is_dir() {
-        // Validate directory
         let files = collect_config_files(&path, args.recursive)?;
         total_files = files.len();
 
         for file in files {
-            let result = validate_single_file(&file, client, args).await?;
+            let result = validate_single_file(&file, &args);
             let has_errors = result.has_errors;
             if result.has_errors {
                 error_count += 1;
@@ -136,7 +86,6 @@ async fn validate_configurations<T: ValidateDbusClient>(
             }
             validation_results.push(result);
 
-            // Stop on first error if not continuing
             if has_errors && !args.continue_on_error {
                 break;
             }
@@ -148,16 +97,14 @@ async fn validate_configurations<T: ValidateDbusClient>(
         ));
     }
 
-    // Output results
     output_validation_results(
         &validation_results,
-        args,
+        &args,
         total_files,
         error_count,
         warning_count,
     )?;
 
-    // Exit with error code if validation failed
     if error_count > 0 {
         std::process::exit(1);
     }
@@ -165,11 +112,7 @@ async fn validate_configurations<T: ValidateDbusClient>(
     Ok(())
 }
 
-async fn validate_single_file<T: ValidateDbusClient>(
-    path: &PathBuf,
-    _client: &T,
-    args: &ValidateArgs,
-) -> Result<ValidationResult> {
+fn validate_single_file(path: &PathBuf, args: &ValidateArgs) -> ValidationResult {
     let mut result = ValidationResult {
         file_path: path.clone(),
         has_errors: false,
@@ -193,55 +136,60 @@ async fn validate_single_file<T: ValidateDbusClient>(
         result.has_warnings = true;
     }
 
-    // Validate file accessibility
-    match std::fs::File::open(path) {
-        Ok(_) => {}
-        Err(e) => {
-            result.errors.push(format!("Cannot read file: {}", e));
-            result.has_errors = true;
-            return Ok(result);
-        }
-    }
-
-    // Read and parse TOML content
+    // Read file content
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) => {
-            result
-                .errors
-                .push(format!("Cannot read file content: {}", e));
+            result.errors.push(format!("Cannot read file: {}", e));
             result.has_errors = true;
-            return Ok(result);
+            return result;
         }
     };
 
     // Parse TOML syntax
     match toml::from_str::<toml::Value>(&content) {
-        Ok(_) => {
-            // Syntax is valid
-            if !args.syntax_only {
-                // TODO: Implement semantic validation via D-Bus when methods are available
-                // For now, just indicate that semantic validation would happen here
+        Ok(_) => {}
+        Err(e) => {
+            result.errors.push(format!("TOML syntax error: {}", e));
+            result.has_errors = true;
+            return result;
+        }
+    }
+
+    // Semantic validation: parse into NamespaceConfig and call .validate()
+    match toml::from_str::<NamespaceConfig>(&content) {
+        Ok(config) => {
+            if let Err(e) = config.validate() {
+                result
+                    .errors
+                    .push(format!("Semantic validation error: {}", e));
+                result.has_errors = true;
             }
         }
         Err(e) => {
-            result.errors.push(format!("TOML syntax error: {}", e));
+            result
+                .errors
+                .push(format!("Cannot parse as NamespaceConfig: {}", e));
             result.has_errors = true;
         }
     }
 
     // Additional file-level validations
     if args.warnings || result.has_errors {
-        validate_file_properties(path, &mut result)?;
+        if let Err(e) = validate_file_properties(path, &mut result) {
+            result
+                .warnings
+                .push(format!("Could not check file properties: {}", e));
+            result.has_warnings = true;
+        }
     }
 
-    Ok(result)
+    result
 }
 
 fn validate_file_properties(path: &PathBuf, result: &mut ValidationResult) -> Result<()> {
     let metadata = std::fs::metadata(path)?;
 
-    // Check file size
     const MAX_CONFIG_SIZE: u64 = 1024 * 1024; // 1MB
     if metadata.len() > MAX_CONFIG_SIZE {
         result.warnings.push(format!(
@@ -251,7 +199,6 @@ fn validate_file_properties(path: &PathBuf, result: &mut ValidationResult) -> Re
         result.has_warnings = true;
     }
 
-    // Check permissions on Unix systems
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -271,7 +218,6 @@ fn validate_file_properties(path: &PathBuf, result: &mut ValidationResult) -> Re
 
 fn collect_config_files(dir: &PathBuf, recursive: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-
     let entries = std::fs::read_dir(dir)?;
 
     for entry in entries {
@@ -305,8 +251,7 @@ fn output_validation_results(
         OutputFormat::Human => {
             output_human_format(results, args, total_files, error_count, warning_count)
         }
-        OutputFormat::Json => output_json_format(results, total_files, error_count, warning_count),
-        OutputFormat::Yaml => output_yaml_format(results, total_files, error_count, warning_count),
+        OutputFormat::Toml => output_toml_format(results, total_files, error_count, warning_count),
     }
 }
 
@@ -361,66 +306,54 @@ fn output_human_format(
     Ok(())
 }
 
-fn output_json_format(
-    results: &[ValidationResult],
-    total_files: usize,
-    error_count: usize,
-    warning_count: usize,
-) -> Result<()> {
-    use serde_json::json;
-
-    let json_results: Vec<_> = results
-        .iter()
-        .map(|r| {
-            json!({
-                "file": r.file_path.to_string_lossy(),
-                "valid": !r.has_errors,
-                "errors": r.errors,
-                "warnings": r.warnings
-            })
-        })
-        .collect();
-
-    let output = json!({
-        "summary": {
-            "total_files": total_files,
-            "error_count": error_count,
-            "warning_count": warning_count,
-            "valid": error_count == 0
-        },
-        "results": json_results
-    });
-
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
+/// Serializable validation output for TOML format
+#[derive(Serialize)]
+struct TomlValidationOutput {
+    summary: TomlValidationSummary,
+    results: Vec<TomlValidationResult>,
 }
 
-fn output_yaml_format(
+#[derive(Serialize)]
+struct TomlValidationSummary {
+    total_files: usize,
+    error_count: usize,
+    warning_count: usize,
+    valid: bool,
+}
+
+#[derive(Serialize)]
+struct TomlValidationResult {
+    file: String,
+    valid: bool,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn output_toml_format(
     results: &[ValidationResult],
     total_files: usize,
     error_count: usize,
     warning_count: usize,
 ) -> Result<()> {
-    println!("summary:");
-    println!("  total_files: {}", total_files);
-    println!("  error_count: {}", error_count);
-    println!("  warning_count: {}", warning_count);
-    println!("  valid: {}", error_count == 0);
-    println!("results:");
+    let output = TomlValidationOutput {
+        summary: TomlValidationSummary {
+            total_files,
+            error_count,
+            warning_count,
+            valid: error_count == 0,
+        },
+        results: results
+            .iter()
+            .map(|r| TomlValidationResult {
+                file: r.file_path.to_string_lossy().to_string(),
+                valid: !r.has_errors,
+                errors: r.errors.clone(),
+                warnings: r.warnings.clone(),
+            })
+            .collect(),
+    };
 
-    for result in results {
-        println!("  - file: \"{}\"", result.file_path.display());
-        println!("    valid: {}", !result.has_errors);
-        println!("    errors:");
-        for error in &result.errors {
-            println!("      - \"{}\"", error);
-        }
-        println!("    warnings:");
-        for warning in &result.warnings {
-            println!("      - \"{}\"", warning);
-        }
-    }
-
+    println!("{}", toml::to_string_pretty(&output)?);
     Ok(())
 }
 
@@ -442,17 +375,15 @@ mod tests {
         let args = ValidateArgs {
             path: Some(PathBuf::from("/etc/segwire/namespaces")),
             recursive: true,
-            format: OutputFormat::Json,
+            format: OutputFormat::Toml,
             warnings: true,
-            syntax_only: false,
             continue_on_error: true,
         };
 
         assert_eq!(args.path, Some(PathBuf::from("/etc/segwire/namespaces")));
         assert!(args.recursive);
-        assert!(matches!(args.format, OutputFormat::Json));
+        assert!(matches!(args.format, OutputFormat::Toml));
         assert!(args.warnings);
-        assert!(!args.syntax_only);
         assert!(args.continue_on_error);
     }
 }

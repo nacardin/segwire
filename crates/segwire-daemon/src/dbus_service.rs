@@ -28,7 +28,10 @@ impl DbusService {
     ) -> Result<Self, SegwireError> {
         let (config_dir, namespace_prefix) = {
             let manager = config_manager.lock().await;
-            (manager.get_config_dir(), manager.get_namespace_prefix())
+            (
+                manager.config_directory().to_path_buf(),
+                manager.namespace_prefix().to_owned(),
+            )
         };
 
         let ctx = LogContext::new("dbus_service_initialization")
@@ -227,7 +230,7 @@ impl NamespaceManagerInterface {
 
         let prefix = {
             let config_mgr = self.config_manager.lock().await;
-            config_mgr.get_namespace_prefix()
+            config_mgr.namespace_prefix().to_owned()
         };
 
         let manager = self.state_manager.lock().await;
@@ -784,7 +787,7 @@ impl NamespaceManagerInterface {
         // Get the configuration directory
         let config_dir = {
             let manager = self.config_manager.lock().await;
-            manager.get_config_dir()
+            manager.config_directory().to_path_buf()
         };
 
         // Scan for configuration files
@@ -940,73 +943,30 @@ impl NamespaceManagerInterface {
         }
     }
 
-    /// Validate configuration semantics and add errors/warnings
+    /// Validate configuration semantics and add errors/warnings.
+    ///
+    /// Delegates to `NamespaceConfig::validate()` for error detection, then
+    /// adds advisory warnings that don't constitute hard errors.
     fn validate_config_semantics(
         &self,
         config: &segwire_common::NamespaceConfig,
         errors: &mut Vec<String>,
         warnings: &mut Vec<String>,
     ) {
-        // Validate namespace name
-        if config.namespace.name.is_empty() {
-            errors.push("Namespace name cannot be empty".to_string());
+        // Delegate to the canonical validation in segwire-common
+        if let Err(e) = config.validate() {
+            errors.push(format!("{}", e));
         }
 
-        if config.namespace.name.len() > 255 {
-            errors.push("Namespace name is too long (max 255 characters)".to_string());
-        }
-
-        // Check for valid characters in namespace name
-        if !config
-            .namespace
-            .name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            errors.push("Namespace name contains invalid characters (only alphanumeric, hyphens, and underscores allowed)".to_string());
-        }
-
-        // Validate interfaces
+        // Advisory warnings (valid config, but potentially incomplete)
         if config.interfaces.move_interfaces.is_empty()
             && config.interfaces.virtual_interfaces.is_empty()
         {
             warnings.push("No interfaces specified for namespace".to_string());
         }
 
-        for interface in &config.interfaces.move_interfaces {
-            if interface.is_empty() {
-                errors.push("Interface name cannot be empty".to_string());
-            }
-        }
-
-        for virtual_interface in &config.interfaces.virtual_interfaces {
-            if virtual_interface.name.is_empty() {
-                errors.push("Virtual interface name cannot be empty".to_string());
-            }
-            if virtual_interface.interface_type.is_empty() {
-                errors.push("Virtual interface type cannot be empty".to_string());
-            }
-        }
-
-        // Validate routing
-        for route in &config.routing.routes {
-            if route.destination.is_empty() {
-                errors.push("Route destination cannot be empty".to_string());
-            }
-            if route.gateway.is_empty() {
-                errors.push("Route gateway cannot be empty".to_string());
-            }
-        }
-
-        // Validate DNS
         if config.dns.servers.is_empty() {
             warnings.push("No DNS servers specified".to_string());
-        }
-
-        for server in &config.dns.servers {
-            if server.is_empty() {
-                errors.push("DNS server address cannot be empty".to_string());
-            }
         }
     }
 

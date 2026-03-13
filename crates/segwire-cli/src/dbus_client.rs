@@ -21,6 +21,9 @@ const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// D-Bus client for communicating with the segwire daemon
 pub struct DbusClient {
+    /// Keeps the D-Bus connection alive for the lifetime of this client.
+    /// The `proxy` borrows from this connection internally, so dropping
+    /// it would invalidate all proxy calls.
     _connection: Connection,
     proxy: Proxy<'static>,
 }
