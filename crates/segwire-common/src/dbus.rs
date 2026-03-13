@@ -332,6 +332,7 @@ pub mod interface {
     pub const METHOD_VALIDATE_CONFIGURATION: &str = "ValidateConfiguration";
     pub const METHOD_GET_DAEMON_STATUS: &str = "GetDaemonStatus";
     pub const METHOD_RESTART_NAMESPACE: &str = "RestartNamespace";
+    pub const METHOD_EXEC_AUTHORIZE: &str = "ExecAuthorize";
 
     /// Signal names as constants
     pub const SIGNAL_NAMESPACE_CREATED: &str = "NamespaceCreated";
@@ -453,6 +454,20 @@ pub mod interface {
                     name: "result",
                     type_signature: "(bsa{ss})",
                     description: "Operation result with success flag, message, and details",
+                }],
+            },
+            MethodInfo {
+                name: METHOD_EXEC_AUTHORIZE,
+                description: "Authorize and resolve a namespace for exec entry",
+                input_args: vec![ArgInfo {
+                    name: "namespace",
+                    type_signature: "s",
+                    description: "Namespace name to enter",
+                }],
+                output_args: vec![ArgInfo {
+                    name: "ns_path",
+                    type_signature: "s",
+                    description: "Validated namespace path under /run/netns/",
                 }],
             },
         ]
@@ -632,6 +647,11 @@ pub mod interface {
     <method name="RestartNamespace">
       <arg direction="in" name="name" type="s"/>
       <arg direction="out" name="result" type="(bsa{ss})"/>
+    </method>
+    
+    <method name="ExecAuthorize">
+      <arg direction="in" name="namespace" type="s"/>
+      <arg direction="out" name="ns_path" type="s"/>
     </method>
     
     <!-- Signals -->
@@ -896,7 +916,7 @@ mod tests {
     #[test]
     fn test_method_enumeration() {
         let method_names = interface::get_method_names();
-        assert_eq!(method_names.len(), 7); // We should have 7 methods
+        assert_eq!(method_names.len(), 8); // 7 original + ExecAuthorize
 
         let signal_names = interface::get_signal_names();
         assert_eq!(signal_names.len(), 6); // We should have 6 signals

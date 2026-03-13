@@ -194,3 +194,155 @@ fn test_config_file_lifecycle() {
 
     assert!(!path.exists(), "Config file should not exist after removal");
 }
+
+/// End-to-end test for the `segwire exec` flow.
+///
+/// Exercises the full lifecycle:
+/// 1. Daemon creates a namespace from config
+/// 2. Resolves the namespace name → `/run/netns/` path (same logic as ExecAuthorize)
+/// 3. Invokes `segwire-ns-enter` with the path (same as CLI would)
+/// 4. Verifies the command ran inside the correct namespace
+///
+/// **Root-only**: requires real namespaces and CAP_SYS_ADMIN for setns.
+///
+/// Note: This test creates ConfigManager and NamespaceStateManager directly
+/// instead of using start_daemon(), avoiding D-Bus connection caching issues
+/// that affect serial tests in the `dbus` crate.
+#[test]
+#[serial]
+fn test_ns_enter_exec() {
+    use segwire_common::DaemonConfig;
+    use segwire_daemon::config::ConfigManager;
+    use segwire_daemon::namespace_state::NamespaceStateManager;
+
+    if !is_root() {
+        eprintln!("Skipping test_ns_enter_exec: requires root");
+        return;
+    }
+
+    // ── Step 1: Create namespace via config + state managers directly ──
+
+    let harness = TestHarness::new().expect("Failed to create test harness");
+
+    harness
+        .write_namespace_config("execns", &namespace_config_with_dummy("execns"))
+        .expect("Failed to write namespace config");
+
+    // Create managers directly (no D-Bus needed)
+    let config_content =
+        std::fs::read_to_string(&harness.config_path).expect("Failed to read config");
+    let daemon_config: DaemonConfig =
+        toml::from_str(&config_content).expect("Failed to parse config");
+    let mut config_mgr = ConfigManager::from_config(daemon_config, harness.config_path.clone());
+    let mut state_mgr = NamespaceStateManager::new_auto().expect("Failed to create state manager");
+
+    let scan_result = config_mgr
+        .scan_namespace_configs()
+        .expect("Config scan failed");
+
+    assert!(
+        !scan_result.is_empty(),
+        "Config scan found no namespace configs"
+    );
+
+    let sync_result = state_mgr
+        .force_sync(&config_mgr)
+        .expect("State sync failed");
+
+    // The namespace is either freshly 'created' or 'updated' (already existed
+    // from a previous test run). Both are fine — either way it's live.
+    assert!(
+        !sync_result.created.is_empty() || !sync_result.updated.is_empty(),
+        "Expected namespace to be created or updated, got: created={:?}, updated={:?}, errors={:?}",
+        sync_result.created,
+        sync_result.updated,
+        sync_result.errors
+    );
+
+    // Resolve namespace name → path (same logic as ExecAuthorize handler)
+    let full_name = config_mgr.generate_full_namespace_name("execns");
+    let ns = state_mgr
+        .get_namespace_state(&full_name)
+        .expect("Namespace state not found");
+    assert!(ns.is_active(), "Namespace should be active");
+
+    let ns_path = format!("/run/netns/{}", full_name);
+    assert!(
+        std::path::Path::new(&ns_path).exists(),
+        "Namespace path '{}' does not exist on disk",
+        ns_path
+    );
+
+    // ── Step 2: Invoke segwire-ns-enter (same as CLI after ExecAuthorize) ──
+
+    let ns_enter_bin = std::env::current_exe()
+        .expect("Failed to get current exe path")
+        .parent()
+        .expect("No parent dir")
+        .parent()
+        .expect("No grandparent dir")
+        .join("segwire-ns-enter");
+
+    assert!(
+        ns_enter_bin.exists(),
+        "segwire-ns-enter not found at {}. Run `cargo build --workspace` first.",
+        ns_enter_bin.display()
+    );
+
+    // Test: echo inside the namespace
+    let output = Command::new(&ns_enter_bin)
+        .args([&ns_path, "--", "echo", "hello-from-namespace"])
+        .output()
+        .expect("Failed to run segwire-ns-enter");
+
+    assert!(
+        output.status.success(),
+        "segwire-ns-enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "hello-from-namespace"
+    );
+
+    // Test: ip link show to verify network isolation
+    let ip_output = Command::new(&ns_enter_bin)
+        .args([&ns_path, "--", "ip", "link", "show"])
+        .output()
+        .expect("Failed to run ip link show via segwire-ns-enter");
+
+    assert!(ip_output.status.success());
+    let ip_stdout = String::from_utf8_lossy(&ip_output.stdout);
+    assert!(
+        ip_stdout.contains("lo"),
+        "Expected loopback in namespace, got: {}",
+        ip_stdout
+    );
+
+    // Test: path validation rejects bad paths
+    let bad_output = Command::new(&ns_enter_bin)
+        .args(["/tmp/not-a-namespace", "--", "echo", "nope"])
+        .output()
+        .expect("Failed to run segwire-ns-enter with bad path");
+
+    assert!(
+        !bad_output.status.success(),
+        "segwire-ns-enter should reject paths not under /run/netns/"
+    );
+
+    // ── Cleanup ──
+
+    if std::env::var("SEGWIRE_TEST_SKIP_CLEANUP").is_err() {
+        let del = Command::new("ip")
+            .args(["netns", "delete", &full_name])
+            .output()
+            .expect("Failed to delete namespace");
+        if !del.status.success() {
+            eprintln!(
+                "Warning: failed to delete namespace '{}': {}",
+                full_name,
+                String::from_utf8_lossy(&del.stderr)
+            );
+        }
+    }
+}

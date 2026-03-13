@@ -147,10 +147,20 @@ object_path = "{}"
 impl Drop for TestHarness {
     fn drop(&mut self) {
         if let Some(pid) = self.dbus_pid {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGTERM,
-            );
+            let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+            let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
+
+            // Wait for the dbus-daemon to actually exit so the next test
+            // doesn't try to connect to the now-dead socket.
+            for _ in 0..50 {
+                match nix::sys::signal::kill(nix_pid, None) {
+                    Ok(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(_) => break, // Process is gone
+                }
+            }
+
+            // Clear the env var so the next harness starts clean
+            std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
         }
     }
 }

@@ -1,0 +1,9 @@
+[package]
+name = "segwire-ns-enter"
+version = "0.1.0"
+edition = "2021"
+description = "Setuid helper binary for entering segwire network namespaces"
+
+[dependencies]
+nix = { workspace = true }
+libc = "0.2"

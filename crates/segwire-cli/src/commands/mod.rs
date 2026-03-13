@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+pub mod exec;
 pub mod list;
 pub mod reload;
 pub mod restart;
@@ -33,4 +34,7 @@ pub enum Commands {
 
     /// Validate configuration files without applying them
     Validate(validate::ValidateArgs),
+
+    /// Execute a command inside a network namespace
+    Exec(exec::ExecArgs),
 }

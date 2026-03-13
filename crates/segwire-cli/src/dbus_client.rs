@@ -191,6 +191,15 @@ impl DbusClient {
             details,
         })
     }
+
+    /// Authorize exec into a namespace and get the validated namespace path
+    pub fn exec_authorize(&self, namespace: &str) -> Result<String> {
+        let (ns_path,): (String,) = self
+            .proxy()
+            .method_call(INTERFACE_NAME, "ExecAuthorize", (namespace,))
+            .context("Failed to authorize namespace exec")?;
+        Ok(ns_path)
+    }
 }
 
 pub mod utils {

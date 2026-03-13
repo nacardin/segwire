@@ -37,5 +37,6 @@ fn main() -> Result<()> {
         Commands::Reload(args) => commands::reload::execute(client, args),
         Commands::Restart(args) => commands::restart::execute(client, args),
         Commands::Validate(_) => unreachable!("handled above"),
+        Commands::Exec(args) => commands::exec::execute(client, args),
     }
 }

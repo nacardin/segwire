@@ -88,12 +88,18 @@ impl DbusService {
                     .log_and_return()
             })?;
 
-        // Build the PolicyKit authorizer
-        let authorizer = match crate::policykit::PolicyKitAuthorizer::new(&connection) {
-            Ok(auth) => Some(auth),
-            Err(e) => {
-                warn!("PolicyKit authorizer initialization failed: {}, authorization checks will use UID fallback", e);
-                None
+        // Build the PolicyKit authorizer (skip in test mode — private dbus-daemons
+        // don't support PID credential passing needed by polkit)
+        let authorizer = if std::env::var("SEGWIRE_TEST_SESSION_BUS").is_ok() {
+            debug!("Skipping PolicyKit authorizer in test mode");
+            None
+        } else {
+            match crate::policykit::PolicyKitAuthorizer::new(&connection) {
+                Ok(auth) => Some(auth),
+                Err(e) => {
+                    warn!("PolicyKit authorizer initialization failed: {}, authorization checks will use UID fallback", e);
+                    None
+                }
             }
         };
 
@@ -478,6 +484,75 @@ impl DbusService {
                                     Ok((result.success, result.message, result.details))
                                 }
                             }
+                        },
+                    );
+                }
+
+                // ── ExecAuthorize ──
+                {
+                    let state = state.clone();
+                    b.method(
+                        "ExecAuthorize",
+                        ("namespace",),
+                        ("ns_path",),
+                        move |ctx, _cr: &mut (), (namespace,): (String,)| {
+                            debug!("D-Bus method call: ExecAuthorize({})", namespace);
+
+                            if let Err(e) = interface_helpers::validate_namespace_name(&namespace) {
+                                warn!("Invalid namespace name '{}': {}", namespace, e.message());
+                                return Err(create_method_err(SegwireError::from(e)));
+                            }
+
+                            let svc = state.lock().unwrap();
+
+                            check_authorization(&svc, "exec", ctx)?;
+
+                            // Resolve the full namespace name
+                            let full_name = {
+                                let config_mgr = svc.config_manager.lock().unwrap();
+                                config_mgr.generate_full_namespace_name(&namespace)
+                            };
+
+                            // Verify the namespace is active
+                            {
+                                let manager = svc.state_manager.lock().unwrap();
+                                let ns_state = manager
+                                    .get_namespace_state(&full_name)
+                                    .or_else(|| manager.get_namespace_state(&namespace));
+
+                                match ns_state {
+                                    Some(ns) if ns.is_active() => {
+                                        debug!("Namespace '{}' is active, authorizing exec", full_name);
+                                    }
+                                    Some(ns) => {
+                                        warn!("Namespace '{}' is not active (status: {})", full_name, ns.status);
+                                        return Err(create_method_err(SegwireError::Network(
+                                            format!("Namespace '{}' is not active", namespace),
+                                        )));
+                                    }
+                                    None => {
+                                        warn!("Namespace '{}' not found", namespace);
+                                        return Err(create_method_err(SegwireError::from(
+                                            DbusError::NamespaceNotFound(format!(
+                                                "Namespace '{}' not found",
+                                                namespace
+                                            )),
+                                        )));
+                                    }
+                                }
+                            }
+
+                            // Build and validate the namespace path
+                            let ns_path = format!("/run/netns/{}", full_name);
+                            if !std::path::Path::new(&ns_path).exists() {
+                                warn!("Namespace path '{}' does not exist on disk", ns_path);
+                                return Err(create_method_err(SegwireError::Network(
+                                    format!("Namespace path '{}' not found", ns_path),
+                                )));
+                            }
+
+                            info!("ExecAuthorize granted for namespace '{}' -> {}", namespace, ns_path);
+                            Ok((ns_path,))
                         },
                     );
                 }

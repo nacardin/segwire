@@ -583,6 +583,20 @@ impl DaemonEventLoop {
         info!("Shutdown requested");
         self.shutdown_signal.store(true, Ordering::Relaxed);
     }
+
+    /// Get a clone of the shutdown signal for external coordination
+    pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
+        self.shutdown_signal.clone()
+    }
+
+    /// Process D-Bus messages for the given duration.
+    ///
+    /// Useful in tests to drive the D-Bus dispatch loop without running
+    /// the full event loop (which spawns background threads and installs
+    /// signal handlers).
+    pub fn process_dbus(&self, timeout: std::time::Duration) -> SegwireResult<()> {
+        self.dbus_service.process(timeout)
+    }
 }
 
 #[cfg(test)]

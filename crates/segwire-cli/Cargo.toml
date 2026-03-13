@@ -11,6 +11,9 @@ segwire-common = { workspace = true }
 # D-Bus communication
 dbus = { workspace = true }
 
+# Unix syscalls (for exec)
+nix = { workspace = true }
+
 # Command-line interface
 clap = { workspace = true }
 

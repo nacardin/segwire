@@ -31,6 +31,7 @@ impl PolicyKitAuthorizer {
         action_mappings.insert("restart".to_string(), actions::DELETE.to_string());
         action_mappings.insert("reload".to_string(), actions::MANAGE.to_string());
         action_mappings.insert("validate".to_string(), actions::STATUS.to_string());
+        action_mappings.insert("exec".to_string(), actions::EXEC.to_string());
 
         // Open a separate connection for authorization calls so we don't
         // interfere with the main service connection's message dispatch.
@@ -251,6 +252,9 @@ pub mod actions {
 
     /// Manage daemon configuration and reload
     pub const MANAGE: &str = "org.segwire.namespace.manage";
+
+    /// Execute a command inside a namespace
+    pub const EXEC: &str = "org.segwire.namespace.exec";
 }
 
 #[cfg(test)]
