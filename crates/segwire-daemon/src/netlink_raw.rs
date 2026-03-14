@@ -24,7 +24,7 @@ use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
 };
 use segwire_common::netlink::NetlinkError;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 // ---------------------------------------------------------------------------
@@ -262,7 +262,25 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
     msg.header.protocol = RouteProtocol::Static;
     msg.header.scope = RouteScope::Universe;
     msg.header.kind = RouteType::Unicast;
-    msg.header.address_family = AddressFamily::Inet;
+
+    // Determine address family from destination/gateway.
+    // We'll detect it from the first successfully parsed IP and
+    // default to Inet for "default" routes without an explicit gateway.
+    let mut detected_family: Option<AddressFamily> = None;
+
+    // Helper closure to convert an IpAddr into a RouteAddress.
+    fn ip_to_route_addr(ip: IpAddr) -> RouteAddress {
+        match ip {
+            IpAddr::V4(v4) => RouteAddress::Inet(v4),
+            IpAddr::V6(v6) => RouteAddress::Inet6(v6),
+        }
+    }
+    fn family_for(ip: &IpAddr) -> AddressFamily {
+        match ip {
+            IpAddr::V4(_) => AddressFamily::Inet,
+            IpAddr::V6(_) => AddressFamily::Inet6,
+        }
+    }
 
     // Destination
     if params.destination == "default" {
@@ -273,31 +291,41 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
             .map_err(|e| format!("invalid prefix length: {}", e))?;
         msg.header.destination_prefix_length = prefix_len;
 
-        let ip: Ipv4Addr = ip_str
+        let ip: IpAddr = ip_str
             .parse()
             .map_err(|e| format!("invalid destination IP: {}", e))?;
+        detected_family = Some(family_for(&ip));
         msg.attributes
-            .push(RouteAttribute::Destination(RouteAddress::Inet(ip)));
+            .push(RouteAttribute::Destination(ip_to_route_addr(ip)));
     } else {
         // Single host route
-        msg.header.destination_prefix_length = 32;
-        let ip: Ipv4Addr = params
+        let ip: IpAddr = params
             .destination
             .parse()
             .map_err(|e| format!("invalid destination IP: {}", e))?;
+        detected_family = Some(family_for(&ip));
+        msg.header.destination_prefix_length = match ip {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
         msg.attributes
-            .push(RouteAttribute::Destination(RouteAddress::Inet(ip)));
+            .push(RouteAttribute::Destination(ip_to_route_addr(ip)));
     }
 
     // Gateway
     if !params.gateway.is_empty() {
-        let gw: Ipv4Addr = params
+        let gw: IpAddr = params
             .gateway
             .parse()
             .map_err(|e| format!("invalid gateway IP: {}", e))?;
+        if detected_family.is_none() {
+            detected_family = Some(family_for(&gw));
+        }
         msg.attributes
-            .push(RouteAttribute::Gateway(RouteAddress::Inet(gw)));
+            .push(RouteAttribute::Gateway(ip_to_route_addr(gw)));
     }
+
+    msg.header.address_family = detected_family.unwrap_or(AddressFamily::Inet);
 
     // Metric
     if let Some(metric) = params.metric {
@@ -319,24 +347,27 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
     Ok(())
 }
 
-/// Dump all routes and return them as formatted strings.
+/// Dump all routes (IPv4 and IPv6) and return them as formatted strings.
 ///
 /// Designed to be called inside a namespace closure.
 pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
-    let mut msg = RouteMessage::default();
-    msg.header.address_family = AddressFamily::Inet;
-
-    let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::GetRoute(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
-    nl_msg.finalize();
-
-    let responses = sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
-
     let mut routes = Vec::new();
-    for resp in responses {
-        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route_msg)) = resp.payload
-        {
-            routes.push(format_route(&route_msg));
+
+    for family in [AddressFamily::Inet, AddressFamily::Inet6] {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = family;
+
+        let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::GetRoute(msg));
+        nl_msg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+        nl_msg.finalize();
+
+        let responses = sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+
+        for resp in responses {
+            if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route_msg)) = resp.payload
+            {
+                routes.push(format_route(&route_msg));
+            }
         }
     }
     Ok(routes)
@@ -346,19 +377,24 @@ pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
 // Address operations — sync (for use inside namespace thread closures)
 // ---------------------------------------------------------------------------
 
-/// Add an IPv4 address to an interface, opening a fresh socket.
+/// Add an IP address (IPv4 or IPv6) to an interface, opening a fresh socket.
 ///
 /// Designed to be called inside a namespace closure.
-pub(crate) fn add_address_fresh(ifname: &str, addr: Ipv4Addr, prefix_len: u8) -> Result<(), String> {
+pub(crate) fn add_address_fresh(ifname: &str, addr: IpAddr, prefix_len: u8) -> Result<(), String> {
     let responses = dump_links_sync().map_err(|e| e.to_string())?;
     let ifindex = extract_interface_index(&responses, ifname).map_err(|e| e.to_string())?;
 
+    let family = match addr {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+
     let mut msg = AddressMessage::default();
-    msg.header.family = AddressFamily::Inet;
+    msg.header.family = family;
     msg.header.prefix_len = prefix_len;
     msg.header.index = ifindex;
-    msg.attributes.push(AddressAttribute::Local(IpAddr::V4(addr)));
-    msg.attributes.push(AddressAttribute::Address(IpAddr::V4(addr)));
+    msg.attributes.push(AddressAttribute::Local(addr));
+    msg.attributes.push(AddressAttribute::Address(addr));
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
     nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
@@ -493,6 +529,7 @@ pub(crate) fn format_route(route: &RouteMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn test_format_route() {
@@ -512,5 +549,25 @@ mod tests {
         assert!(formatted.contains("192.168.1.0/24"));
         assert!(formatted.contains("via 10.0.0.1"));
         assert!(formatted.contains("metric 100"));
+    }
+
+    #[test]
+    fn test_format_route_ipv6() {
+        let mut msg = RouteMessage::default();
+        msg.header.destination_prefix_length = 64;
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0),
+            )));
+        msg.attributes
+            .push(RouteAttribute::Gateway(RouteAddress::Inet6(Ipv6Addr::new(
+                0xfe80, 0, 0, 0, 0, 0, 0, 1,
+            ))));
+        msg.attributes.push(RouteAttribute::Priority(200));
+
+        let formatted = format_route(&msg);
+        assert!(formatted.contains("fd00::/64"));
+        assert!(formatted.contains("via fe80::1"));
+        assert!(formatted.contains("metric 200"));
     }
 }

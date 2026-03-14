@@ -446,12 +446,12 @@ impl NetlinkManager {
         Ok(())
     }
 
-    /// Add an IPv4 address to an interface inside a namespace.
+    /// Add an IP address to an interface inside a namespace.
     pub fn add_address_in_namespace(
         &self,
         namespace_name: &str,
         ifname: &str,
-        addr: std::net::Ipv4Addr,
+        addr: std::net::IpAddr,
         prefix_len: u8,
     ) -> SegwireResult<()> {
         if self.is_simulated() {
@@ -511,8 +511,8 @@ impl NetlinkManager {
             .map_err(SegwireError::Network)
     }
 
-    /// Add an IPv4 address to an interface in the host (default) namespace.
-    pub fn add_address(&self, ifname: &str, addr: std::net::Ipv4Addr, prefix_len: u8) -> SegwireResult<()> {
+    /// Add an IP address to an interface in the host (default) namespace.
+    pub fn add_address(&self, ifname: &str, addr: std::net::IpAddr, prefix_len: u8) -> SegwireResult<()> {
         if self.is_simulated() {
             info!("[SIM] Added address {}/{} to interface '{}'", addr, prefix_len, ifname);
             return Ok(());

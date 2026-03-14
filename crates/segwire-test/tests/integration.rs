@@ -251,19 +251,20 @@ fn test_ns_enter_exec() {
     }
 }
 
-/// End-to-end veth pair + ping test for the `segwire exec` flow.
+/// End-to-end veth pair + dual-stack ping test for the `segwire exec` flow.
 ///
-/// Creates a namespace with a veth pair, assigns IP addresses via netlink,
-/// and verifies bidirectional ICMP connectivity:
+/// Creates a namespace with a veth pair, assigns both IPv4 and IPv6 addresses
+/// via netlink, and verifies bidirectional ICMP/ICMPv6 connectivity:
 /// - NS → Host via `segwire-ns-enter` (the exec path)
 /// - Host → NS via `ping`
 ///
 /// ```text
 /// Host side                    Namespace side
-/// ┌─────────────┐              ┌─────────────┐
-/// │ veth-host   │──────────────│ veth-ns     │
-/// │ 10.99.0.1/24│              │ 10.99.0.2/24│
-/// └─────────────┘              └─────────────┘
+/// ┌─────────────┐              ┌──────────────┐
+/// │ veth-host   │──────────────│ veth-ns      │
+/// │ 10.99.0.1/24│              │ 10.99.0.2/24 │
+/// │ fd99::1/64  │              │ fd99::2/64   │
+/// └─────────────┘              └──────────────┘
 /// ```
 ///
 /// **Root-only**: requires real namespaces and CAP_NET_ADMIN.
@@ -277,10 +278,10 @@ fn test_veth_ping_exec() {
 
     let harness = TestHarness::new().expect("Failed to create test harness");
 
-    // Config: veth pair with NS-side address
+    // Config: veth pair with both IPv4 and IPv6 NS-side addresses
     let config = r#"[namespace]
 name = "pingns"
-description = "Veth pair ping test namespace"
+description = "Veth pair dual-stack ping test namespace"
 
 [interfaces]
 move_interfaces = []
@@ -289,12 +290,12 @@ move_interfaces = []
 name = "veth-ns"
 interface_type = "veth"
 peer = "veth-host"
-addresses = ["10.99.0.2/24"]
+addresses = ["10.99.0.2/24", "fd99::2/64"]
 
 [routing]
 
 [dns]
-servers = ["8.8.8.8"]
+servers = ["8.8.8.8", "2001:4860:4860::8888"]
 "#;
 
     harness
@@ -322,17 +323,27 @@ servers = ["8.8.8.8"]
         ns_path
     );
 
-    // ── Assign host-side address (10.99.0.1/24) to veth-host ──
+    // ── Assign host-side addresses to veth-host ──
     // The daemon brought veth-host UP but didn't assign an address
     // (addresses in config apply to the NS-side interface).
-    let ip_add = Command::new("ip")
+    let ip_add_v4 = Command::new("ip")
         .args(["addr", "add", "10.99.0.1/24", "dev", "veth-host"])
         .output()
-        .expect("Failed to add address to veth-host");
+        .expect("Failed to add IPv4 address to veth-host");
     assert!(
-        ip_add.status.success(),
-        "Failed to assign address to veth-host: {}",
-        String::from_utf8_lossy(&ip_add.stderr)
+        ip_add_v4.status.success(),
+        "Failed to assign IPv4 address to veth-host: {}",
+        String::from_utf8_lossy(&ip_add_v4.stderr)
+    );
+
+    let ip_add_v6 = Command::new("ip")
+        .args(["addr", "add", "fd99::1/64", "dev", "veth-host"])
+        .output()
+        .expect("Failed to add IPv6 address to veth-host");
+    assert!(
+        ip_add_v6.status.success(),
+        "Failed to assign IPv6 address to veth-host: {}",
+        String::from_utf8_lossy(&ip_add_v6.stderr)
     );
 
     // ── Locate segwire-ns-enter ──
@@ -350,30 +361,56 @@ servers = ["8.8.8.8"]
         ns_enter_bin.display()
     );
 
-    // ── Ping from inside namespace → host (NS → Host) ──
-    let ping_out = Command::new(&ns_enter_bin)
+    // ── IPv4: Ping from inside namespace → host (NS → Host) ──
+    let ping_out_v4 = Command::new(&ns_enter_bin)
         .args([&ns_path, "--", "ping", "-c1", "-W2", "10.99.0.1"])
         .output()
         .expect("Failed to run ping via segwire-ns-enter");
 
     assert!(
-        ping_out.status.success(),
-        "Ping from NS to host failed.\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&ping_out.stdout),
-        String::from_utf8_lossy(&ping_out.stderr)
+        ping_out_v4.status.success(),
+        "IPv4 ping from NS to host failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ping_out_v4.stdout),
+        String::from_utf8_lossy(&ping_out_v4.stderr)
     );
 
-    // ── Ping from host → inside namespace (Host → NS) ──
-    let ping_in = Command::new("ping")
+    // ── IPv4: Ping from host → inside namespace (Host → NS) ──
+    let ping_in_v4 = Command::new("ping")
         .args(["-c1", "-W2", "10.99.0.2"])
         .output()
         .expect("Failed to run ping from host");
 
     assert!(
-        ping_in.status.success(),
-        "Ping from host to NS failed.\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&ping_in.stdout),
-        String::from_utf8_lossy(&ping_in.stderr)
+        ping_in_v4.status.success(),
+        "IPv4 ping from host to NS failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ping_in_v4.stdout),
+        String::from_utf8_lossy(&ping_in_v4.stderr)
+    );
+
+    // ── IPv6: Ping from inside namespace → host (NS → Host) ──
+    let ping_out_v6 = Command::new(&ns_enter_bin)
+        .args([&ns_path, "--", "ping", "-6", "-c1", "-W2", "fd99::1"])
+        .output()
+        .expect("Failed to run ping6 via segwire-ns-enter");
+
+    assert!(
+        ping_out_v6.status.success(),
+        "IPv6 ping from NS to host failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ping_out_v6.stdout),
+        String::from_utf8_lossy(&ping_out_v6.stderr)
+    );
+
+    // ── IPv6: Ping from host → inside namespace (Host → NS) ──
+    let ping_in_v6 = Command::new("ping")
+        .args(["-6", "-c1", "-W2", "fd99::2"])
+        .output()
+        .expect("Failed to run ping6 from host");
+
+    assert!(
+        ping_in_v6.status.success(),
+        "IPv6 ping from host to NS failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ping_in_v6.stdout),
+        String::from_utf8_lossy(&ping_in_v6.stderr)
     );
 
     // ── Cleanup ──

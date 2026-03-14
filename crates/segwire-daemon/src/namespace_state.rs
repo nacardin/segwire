@@ -799,8 +799,8 @@ impl NamespaceStateManager {
         Ok(())
     }
 
-    /// Parse a CIDR address string (e.g. "10.0.0.2/24") and apply it to an
-    /// interface inside a namespace.
+    /// Parse a CIDR address string (e.g. "10.0.0.2/24" or "fd00::2/64") and
+    /// apply it to an interface inside a namespace.
     fn apply_address_in_namespace(
         &self,
         namespace_name: &str,
@@ -814,7 +814,7 @@ impl NamespaceStateManager {
             })
         })?;
 
-        let addr: std::net::Ipv4Addr = ip_str.parse().map_err(|e| {
+        let addr: std::net::IpAddr = ip_str.parse().map_err(|e| {
             SegwireError::Config(segwire_common::error::ConfigError::InvalidValue {
                 field: "addresses".to_string(),
                 value: format!("invalid IP '{}': {}", ip_str, e),
