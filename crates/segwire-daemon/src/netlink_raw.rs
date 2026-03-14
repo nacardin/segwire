@@ -15,7 +15,8 @@ use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST,
 };
 use netlink_packet_route::{
-    link::{InfoData, InfoKind, InfoVeth, LinkAttribute, LinkInfo, LinkMessage},
+    address::{AddressAttribute, AddressMessage},
+    link::{LinkFlags, InfoData, InfoKind, InfoVeth, LinkAttribute, LinkInfo, LinkMessage},
     route::{
         RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
         RouteType,
@@ -23,7 +24,7 @@ use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
 };
 use segwire_common::netlink::NetlinkError;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::{AsRawFd, OwnedFd};
 
 // ---------------------------------------------------------------------------
@@ -339,6 +340,52 @@ pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
         }
     }
     Ok(routes)
+}
+
+// ---------------------------------------------------------------------------
+// Address operations — sync (for use inside namespace thread closures)
+// ---------------------------------------------------------------------------
+
+/// Add an IPv4 address to an interface, opening a fresh socket.
+///
+/// Designed to be called inside a namespace closure.
+pub(crate) fn add_address_fresh(ifname: &str, addr: Ipv4Addr, prefix_len: u8) -> Result<(), String> {
+    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let ifindex = extract_interface_index(&responses, ifname).map_err(|e| e.to_string())?;
+
+    let mut msg = AddressMessage::default();
+    msg.header.family = AddressFamily::Inet;
+    msg.header.prefix_len = prefix_len;
+    msg.header.index = ifindex;
+    msg.attributes.push(AddressAttribute::Local(IpAddr::V4(addr)));
+    msg.attributes.push(AddressAttribute::Address(IpAddr::V4(addr)));
+
+    let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
+    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+    nl_msg.finalize();
+
+    sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Set a network interface to UP state, opening a fresh socket.
+///
+/// Designed to be called inside a namespace closure.
+pub(crate) fn set_link_up_fresh(ifname: &str) -> Result<(), String> {
+    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let ifindex = extract_interface_index(&responses, ifname).map_err(|e| e.to_string())?;
+
+    let mut msg = LinkMessage::default();
+    msg.header.index = ifindex;
+    msg.header.flags = LinkFlags::Up;
+    msg.header.change_mask = LinkFlags::Up;
+
+    let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
+    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+    nl_msg.finalize();
+
+    sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

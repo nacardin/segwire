@@ -412,6 +412,21 @@ impl NamespaceStateManager {
                                 } else {
                                     if let Err(e) = self.netlink_manager.move_interface_to_namespace(&vif.name, full_name) {
                                         warn!("Failed to move veth {} into {}: {}", vif.name, full_name, e);
+                                    } else {
+                                        // Assign addresses to NS-side interface
+                                        for addr_cidr in &vif.addresses {
+                                            if let Err(e) = self.apply_address_in_namespace(full_name, &vif.name, addr_cidr) {
+                                                warn!("Failed to assign address {} to {} in {}: {}", addr_cidr, vif.name, full_name, e);
+                                            }
+                                        }
+                                        // Bring NS-side interface up
+                                        if let Err(e) = self.netlink_manager.set_link_up_in_namespace(full_name, &vif.name) {
+                                            warn!("Failed to bring {} up in {}: {}", vif.name, full_name, e);
+                                        }
+                                    }
+                                    // Bring host-side peer up
+                                    if let Err(e) = self.netlink_manager.set_link_up(peer) {
+                                        warn!("Failed to bring peer {} up: {}", peer, e);
                                     }
                                 }
                             }
@@ -423,6 +438,17 @@ impl NamespaceStateManager {
                                     "Failed to create virtual interface {} type {} in {}: {}",
                                     vif.name, vif.interface_type, full_name, e
                                 );
+                            } else {
+                                // Assign addresses
+                                for addr_cidr in &vif.addresses {
+                                    if let Err(e) = self.apply_address_in_namespace(full_name, &vif.name, addr_cidr) {
+                                        warn!("Failed to assign address {} to {} in {}: {}", addr_cidr, vif.name, full_name, e);
+                                    }
+                                }
+                                // Bring interface up
+                                if let Err(e) = self.netlink_manager.set_link_up_in_namespace(full_name, &vif.name) {
+                                    warn!("Failed to bring {} up in {}: {}", vif.name, full_name, e);
+                                }
                             }
                         }
                     }
@@ -771,6 +797,39 @@ impl NamespaceStateManager {
         }
 
         Ok(())
+    }
+
+    /// Parse a CIDR address string (e.g. "10.0.0.2/24") and apply it to an
+    /// interface inside a namespace.
+    fn apply_address_in_namespace(
+        &self,
+        namespace_name: &str,
+        ifname: &str,
+        addr_cidr: &str,
+    ) -> SegwireResult<()> {
+        let (ip_str, prefix_str) = addr_cidr.split_once('/').ok_or_else(|| {
+            SegwireError::Config(segwire_common::error::ConfigError::InvalidValue {
+                field: "addresses".to_string(),
+                value: format!("missing prefix length in '{}'", addr_cidr),
+            })
+        })?;
+
+        let addr: std::net::Ipv4Addr = ip_str.parse().map_err(|e| {
+            SegwireError::Config(segwire_common::error::ConfigError::InvalidValue {
+                field: "addresses".to_string(),
+                value: format!("invalid IP '{}': {}", ip_str, e),
+            })
+        })?;
+
+        let prefix_len: u8 = prefix_str.parse().map_err(|e| {
+            SegwireError::Config(segwire_common::error::ConfigError::InvalidValue {
+                field: "addresses".to_string(),
+                value: format!("invalid prefix length '{}': {}", prefix_str, e),
+            })
+        })?;
+
+        self.netlink_manager
+            .add_address_in_namespace(namespace_name, ifname, addr, prefix_len)
     }
 }
 

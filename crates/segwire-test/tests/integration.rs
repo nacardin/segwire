@@ -250,3 +250,151 @@ fn test_ns_enter_exec() {
         }
     }
 }
+
+/// End-to-end veth pair + ping test for the `segwire exec` flow.
+///
+/// Creates a namespace with a veth pair, assigns IP addresses via netlink,
+/// and verifies bidirectional ICMP connectivity:
+/// - NS → Host via `segwire-ns-enter` (the exec path)
+/// - Host → NS via `ping`
+///
+/// ```text
+/// Host side                    Namespace side
+/// ┌─────────────┐              ┌─────────────┐
+/// │ veth-host   │──────────────│ veth-ns     │
+/// │ 10.99.0.1/24│              │ 10.99.0.2/24│
+/// └─────────────┘              └─────────────┘
+/// ```
+///
+/// **Root-only**: requires real namespaces and CAP_NET_ADMIN.
+#[test]
+#[serial]
+fn test_veth_ping_exec() {
+    if !is_root() {
+        eprintln!("Skipping test_veth_ping_exec: requires root");
+        return;
+    }
+
+    let harness = TestHarness::new().expect("Failed to create test harness");
+
+    // Config: veth pair with NS-side address
+    let config = r#"[namespace]
+name = "pingns"
+description = "Veth pair ping test namespace"
+
+[interfaces]
+move_interfaces = []
+
+[[interfaces.virtual_interfaces]]
+name = "veth-ns"
+interface_type = "veth"
+peer = "veth-host"
+addresses = ["10.99.0.2/24"]
+
+[routing]
+
+[dns]
+servers = ["8.8.8.8"]
+"#;
+
+    harness
+        .write_namespace_config("pingns", config)
+        .expect("Failed to write namespace config");
+
+    // Start daemon in background
+    let (handle, shutdown) = harness
+        .start_daemon_background()
+        .expect("Failed to start daemon");
+
+    // Reload config via CLI — this creates the namespace + veth + addresses
+    segwire_cli::run_cli(["segwire", "reload"])
+        .expect("'segwire reload' failed");
+
+    // Verify namespace is visible via CLI
+    segwire_cli::run_cli(["segwire", "status", "pingns"])
+        .expect("'segwire status pingns' failed");
+
+    let full_name = "test-pingns";
+    let ns_path = format!("/run/netns/{}", full_name);
+    assert!(
+        std::path::Path::new(&ns_path).exists(),
+        "Namespace path '{}' does not exist on disk",
+        ns_path
+    );
+
+    // ── Assign host-side address (10.99.0.1/24) to veth-host ──
+    // The daemon brought veth-host UP but didn't assign an address
+    // (addresses in config apply to the NS-side interface).
+    let ip_add = Command::new("ip")
+        .args(["addr", "add", "10.99.0.1/24", "dev", "veth-host"])
+        .output()
+        .expect("Failed to add address to veth-host");
+    assert!(
+        ip_add.status.success(),
+        "Failed to assign address to veth-host: {}",
+        String::from_utf8_lossy(&ip_add.stderr)
+    );
+
+    // ── Locate segwire-ns-enter ──
+    let ns_enter_bin = std::env::current_exe()
+        .expect("Failed to get current exe path")
+        .parent()
+        .expect("No parent dir")
+        .parent()
+        .expect("No grandparent dir")
+        .join("segwire-ns-enter");
+
+    assert!(
+        ns_enter_bin.exists(),
+        "segwire-ns-enter not found at {}. Run `cargo build --workspace` first.",
+        ns_enter_bin.display()
+    );
+
+    // ── Ping from inside namespace → host (NS → Host) ──
+    let ping_out = Command::new(&ns_enter_bin)
+        .args([&ns_path, "--", "ping", "-c1", "-W2", "10.99.0.1"])
+        .output()
+        .expect("Failed to run ping via segwire-ns-enter");
+
+    assert!(
+        ping_out.status.success(),
+        "Ping from NS to host failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ping_out.stdout),
+        String::from_utf8_lossy(&ping_out.stderr)
+    );
+
+    // ── Ping from host → inside namespace (Host → NS) ──
+    let ping_in = Command::new("ping")
+        .args(["-c1", "-W2", "10.99.0.2"])
+        .output()
+        .expect("Failed to run ping from host");
+
+    assert!(
+        ping_in.status.success(),
+        "Ping from host to NS failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ping_in.stdout),
+        String::from_utf8_lossy(&ping_in.stderr)
+    );
+
+    // ── Cleanup ──
+    shutdown.store(true, Ordering::SeqCst);
+    handle.join().expect("Daemon thread panicked");
+
+    if std::env::var("SEGWIRE_TEST_SKIP_CLEANUP").is_err() {
+        // Delete the veth pair (deleting one end removes the other)
+        let _ = Command::new("ip")
+            .args(["link", "delete", "veth-host"])
+            .output();
+        let del = Command::new("ip")
+            .args(["netns", "delete", full_name])
+            .output()
+            .expect("Failed to delete namespace");
+        if !del.status.success() {
+            eprintln!(
+                "Warning: failed to delete namespace '{}': {}",
+                full_name,
+                String::from_utf8_lossy(&del.stderr)
+            );
+        }
+    }
+}

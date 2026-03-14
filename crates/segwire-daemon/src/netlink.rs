@@ -446,6 +446,82 @@ impl NetlinkManager {
         Ok(())
     }
 
+    /// Add an IPv4 address to an interface inside a namespace.
+    pub fn add_address_in_namespace(
+        &self,
+        namespace_name: &str,
+        ifname: &str,
+        addr: std::net::Ipv4Addr,
+        prefix_len: u8,
+    ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Added address {}/{} to interface '{}' in namespace '{}'",
+                addr, prefix_len, ifname, namespace_name
+            );
+            return Ok(());
+        }
+        segwire_common::utils::validate_namespace_name(namespace_name)?;
+
+        let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
+        let ifname = ifname.to_string();
+
+        let result = netns_raw::run_in_namespace(&ns_path, move || {
+            netlink_raw::add_address_fresh(&ifname, addr, prefix_len)
+        })
+        .map_err(SegwireError::Network)?;
+
+        result.map_err(SegwireError::Network)
+    }
+
+    /// Bring a network interface UP inside a namespace.
+    pub fn set_link_up_in_namespace(
+        &self,
+        namespace_name: &str,
+        ifname: &str,
+    ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Set interface '{}' UP in namespace '{}'",
+                ifname, namespace_name
+            );
+            return Ok(());
+        }
+        segwire_common::utils::validate_namespace_name(namespace_name)?;
+
+        let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
+        let ifname = ifname.to_string();
+
+        let result = netns_raw::run_in_namespace(&ns_path, move || {
+            netlink_raw::set_link_up_fresh(&ifname)
+        })
+        .map_err(SegwireError::Network)?;
+
+        result.map_err(SegwireError::Network)
+    }
+
+    /// Bring a network interface UP in the host (default) namespace.
+    pub fn set_link_up(&self, ifname: &str) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!("[SIM] Set interface '{}' UP", ifname);
+            return Ok(());
+        }
+
+        netlink_raw::set_link_up_fresh(ifname)
+            .map_err(SegwireError::Network)
+    }
+
+    /// Add an IPv4 address to an interface in the host (default) namespace.
+    pub fn add_address(&self, ifname: &str, addr: std::net::Ipv4Addr, prefix_len: u8) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!("[SIM] Added address {}/{} to interface '{}'", addr, prefix_len, ifname);
+            return Ok(());
+        }
+
+        netlink_raw::add_address_fresh(ifname, addr, prefix_len)
+            .map_err(SegwireError::Network)
+    }
+
     // -----------------------------------------------------------------------
     // Route operations
     // -----------------------------------------------------------------------

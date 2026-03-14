@@ -128,6 +128,9 @@ pub struct VirtualInterface {
     pub name: String,
     pub interface_type: String,
     pub peer: Option<String>,
+    /// IP addresses to assign in CIDR notation (e.g. "10.0.0.2/24")
+    #[serde(default)]
+    pub addresses: Vec<String>,
 }
 
 /// Routing configuration
@@ -275,6 +278,14 @@ impl VirtualInterface {
         // veth interfaces require a peer
         if self.interface_type == "veth" && self.peer.is_none() {
             return Err(ConfigError::MissingField("interfaces.virtual.peer".to_string()).into());
+        }
+
+        // Validate addresses (must be valid CIDR)
+        for (i, addr) in self.addresses.iter().enumerate() {
+            validate_cidr(addr).map_err(|_| ConfigError::InvalidValue {
+                field: format!("interfaces.virtual.addresses[{}]", i),
+                value: addr.clone(),
+            })?;
         }
 
         Ok(())
@@ -505,6 +516,9 @@ impl NamespaceConfig {
             if let Some(ref mut peer) = vif.peer {
                 *peer = substitute_env_vars(peer, &self.environment)?;
             }
+            for addr in &mut vif.addresses {
+                *addr = substitute_env_vars(addr, &self.environment)?;
+            }
         }
 
         // Substitute in routing configuration
@@ -608,6 +622,7 @@ mod tests {
                     name: "veth-app".to_string(),
                     interface_type: "veth".to_string(),
                     peer: Some("veth-host".to_string()),
+                    addresses: vec![],
                 }],
             },
             routing: RoutingConfig {
@@ -747,6 +762,7 @@ config_dir = "/tmp"
             name: "veth0".to_string(),
             interface_type: "veth".to_string(),
             peer: None, // veth requires peer
+            addresses: vec![],
         };
 
         // Should fail without peer for veth
@@ -857,6 +873,7 @@ config_dir = "/tmp"
                     name: "veth-${APP_NAME}".to_string(),
                     interface_type: "veth".to_string(),
                     peer: Some("veth-${APP_NAME}-host".to_string()),
+                    addresses: vec![],
                 }],
             },
             routing: RoutingConfig {
