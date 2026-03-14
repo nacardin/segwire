@@ -1,21 +1,24 @@
 //! Test harness for integration tests.
 //!
-//! Creates a temporary configuration directory, optionally launches a private
-//! D-Bus session, starts the daemon event loop in-process, and provides
-//! helpers for writing namespace configs.
+//! Creates a temporary configuration directory, launches a private D-Bus
+//! session, starts the daemon event loop in-process, and provides helpers
+//! for writing namespace configs.
+//!
+//! The harness registers the daemon under the **default** well-known name
+//! (`org.segwire.NamespaceManager`) on a private session bus so that the
+//! standard CLI code-path can connect to it without any special wiring.
 
 use anyhow::{Context, Result};
+use segwire_common::dbus::interface;
 use segwire_common::DaemonConfig;
 use segwire_daemon::event_loop::DaemonEventLoop;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use tempfile::TempDir;
-
-/// Global test counter for unique D-Bus service names.
-static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Test harness that manages a daemon instance.
 pub struct TestHarness {
@@ -23,8 +26,6 @@ pub struct TestHarness {
     pub config_dir: TempDir,
     /// Path to the master daemon.toml config file.
     pub config_path: PathBuf,
-    /// Shutdown flag for the daemon.
-    shutdown_flag: Arc<AtomicBool>,
     /// PID of the private dbus-daemon, if we launched one.
     dbus_pid: Option<u32>,
 }
@@ -32,18 +33,18 @@ pub struct TestHarness {
 impl TestHarness {
     /// Create a new test harness.
     ///
-    /// Sets `SEGWIRE_TEST_SESSION_BUS=1` so the daemon uses session D-Bus.
-    /// If `DBUS_SESSION_BUS_ADDRESS` is not set (e.g. under `sudo`), a
-    /// private `dbus-daemon` is launched automatically.
+    /// Launches a **private** `dbus-daemon` for test isolation and sets
+    /// `DBUS_SESSION_BUS_ADDRESS` so that both the daemon and the CLI client
+    /// connect to it automatically.
+    ///
+    /// The daemon configuration uses the **default** well-known D-Bus name
+    /// (`org.segwire.NamespaceManager`) so the CLI needs zero customisation.
     ///
     /// **Note**: this does NOT set `SEGWIRE_SIMULATION`. The test must set
     /// that itself if it wants simulation mode.
     pub fn new() -> Result<Self> {
-        std::env::set_var("SEGWIRE_TEST_SESSION_BUS", "1");
 
         // Launch a private dbus-daemon for test isolation.
-        // Use --fork so the daemon backgrounds itself after printing the address.
-        // We record the PID for cleanup in Drop.
         let output = Command::new("dbus-daemon")
             .args(["--session", "--fork", "--print-address", "--print-pid"])
             .stdout(Stdio::piped())
@@ -71,12 +72,8 @@ impl TestHarness {
         let config_dir = TempDir::new()?;
         let config_path = config_dir.path().join("daemon.toml");
 
-        // Generate a unique D-Bus service name for this test instance
-        let test_id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let service_name = format!("org.segwire.Test{}", test_id);
-        let object_path = format!("/org/segwire/Test{}", test_id);
-
-        // Write a minimal daemon.toml
+        // Write a minimal daemon.toml using the **default** D-Bus name so
+        // the unmodified CLI can discover the service.
         let mut f = std::fs::File::create(&config_path)?;
         writeln!(
             f,
@@ -92,14 +89,13 @@ service_name = "{}"
 object_path = "{}"
 "#,
             config_dir.path().display(),
-            service_name,
-            object_path,
+            interface::SERVICE_NAME,
+            interface::OBJECT_PATH,
         )?;
 
         Ok(Self {
             config_dir,
             config_path,
-            shutdown_flag: Arc::new(AtomicBool::new(false)),
             dbus_pid,
         })
     }
@@ -125,22 +121,37 @@ object_path = "{}"
 
     /// Start the daemon event loop on a background thread.
     ///
+    /// Returns a join handle and a shutdown flag.  Set the flag to `true`
+    /// and then `join()` the handle to perform a graceful shutdown.
+    pub fn start_daemon_background(&self) -> Result<(JoinHandle<()>, Arc<AtomicBool>)> {
+        let config_content = std::fs::read_to_string(&self.config_path)?;
+        let daemon_config: DaemonConfig = toml::from_str(&config_content)?;
+        let event_loop = DaemonEventLoop::new(daemon_config, self.config_path.clone())?;
+        let shutdown = event_loop.shutdown_signal();
+
+        let handle = std::thread::Builder::new()
+            .name("test-daemon".to_string())
+            .spawn(move || {
+                if let Err(e) = event_loop.run() {
+                    eprintln!("Daemon event loop error: {}", e);
+                }
+            })
+            .context("Failed to spawn daemon thread")?;
+
+        // Give the daemon a moment to register its D-Bus name.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        Ok((handle, shutdown))
+    }
+
+    /// Start the daemon event loop (foreground, non-blocking init).
+    ///
     /// Returns a `DaemonEventLoop` that can be used to interact with the daemon.
     pub fn start_daemon(&self) -> Result<DaemonEventLoop> {
         let config_content = std::fs::read_to_string(&self.config_path)?;
         let daemon_config: DaemonConfig = toml::from_str(&config_content)?;
         let event_loop = DaemonEventLoop::new(daemon_config, self.config_path.clone())?;
         Ok(event_loop)
-    }
-
-    /// Get the shutdown flag for graceful shutdown testing.
-    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
-        self.shutdown_flag.clone()
-    }
-
-    /// Request a shutdown.
-    pub fn request_shutdown(&self) {
-        self.shutdown_flag.store(true, Ordering::SeqCst);
     }
 }
 

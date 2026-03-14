@@ -51,8 +51,9 @@ impl DbusService {
 
         log_info!(ctx, "Initializing D-Bus service");
 
-        // Connect to D-Bus — use session bus in simulation or test mode
-        let use_session_bus = std::env::var("SEGWIRE_TEST_SESSION_BUS").is_ok();
+        // Connect to D-Bus — use session bus when DBUS_SESSION_BUS_ADDRESS is set
+        // (e.g. during tests with a private dbus-daemon)
+        let use_session_bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok();
 
         let connection = if use_session_bus {
             log_info!(ctx, "Using session D-Bus (simulation/test mode)");
@@ -88,9 +89,9 @@ impl DbusService {
                     .log_and_return()
             })?;
 
-        // Build the PolicyKit authorizer (skip in test mode — private dbus-daemons
+        // Build the PolicyKit authorizer (skip on session bus — private dbus-daemons
         // don't support PID credential passing needed by polkit)
-        let authorizer = if std::env::var("SEGWIRE_TEST_SESSION_BUS").is_ok() {
+        let authorizer = if use_session_bus {
             debug!("Skipping PolicyKit authorizer in test mode");
             None
         } else {

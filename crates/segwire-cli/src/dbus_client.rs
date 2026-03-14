@@ -51,7 +51,7 @@ impl DbusClient {
         let mut last_error = None;
 
         for attempt in 1..=MAX_RETRY_ATTEMPTS {
-            let conn_res = if cfg!(test) || std::env::var("SEGWIRE_TEST_SESSION_BUS").is_ok() {
+            let conn_res = if cfg!(test) || std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
                 Connection::new_session()
             } else {
                 Connection::new_system()

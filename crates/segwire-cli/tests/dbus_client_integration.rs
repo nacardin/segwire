@@ -113,7 +113,7 @@ fn start_mock_daemon(ready: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
 
 #[test]
 fn test_dbus_client_mock() -> Result<()> {
-    std::env::set_var("SEGWIRE_TEST_SESSION_BUS", "1");
+    // DbusClient uses cfg!(test) and DBUS_SESSION_BUS_ADDRESS to select the session bus
 
     let ready = Arc::new(AtomicBool::new(false));
     let _handle = start_mock_daemon(ready.clone());
