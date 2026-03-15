@@ -431,6 +431,40 @@ impl NamespaceStateManager {
                                 }
                             }
                         }
+                        "wireguard" => {
+                            // Create WireGuard interface inside the namespace
+                            if let Err(e) = self.netlink_manager.create_wireguard_interface(full_name, &vif.name) {
+                                warn!(
+                                    "Failed to create WireGuard interface {} in {}: {}",
+                                    vif.name, full_name, e
+                                );
+                            } else {
+                                // Assign addresses to WireGuard interface
+                                for addr_cidr in &vif.addresses {
+                                    if let Err(e) = self.apply_address_in_namespace(full_name, &vif.name, addr_cidr) {
+                                        warn!("Failed to assign address {} to {} in {}: {}", addr_cidr, vif.name, full_name, e);
+                                    }
+                                }
+                                // Bring interface up
+                                if let Err(e) = self.netlink_manager.set_link_up_in_namespace(full_name, &vif.name) {
+                                    warn!("Failed to bring {} up in {}: {}", vif.name, full_name, e);
+                                }
+                                // Apply WireGuard configuration (keys, peers)
+                                if let Some(ref wg_config) = config_entry.config.wireguard {
+                                    if let Err(e) = self.netlink_manager.configure_wireguard(full_name, &vif.name, wg_config) {
+                                        warn!(
+                                            "Failed to configure WireGuard device {} in {}: {}",
+                                            vif.name, full_name, e
+                                        );
+                                    } else {
+                                        info!(
+                                            "Configured WireGuard device '{}' in '{}' with {} peers",
+                                            vif.name, full_name, wg_config.peers.len()
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         _ => {
                             // Create dummy, bridge, macvlan, ipvlan inside the namespace
                             if let Err(e) = self.netlink_manager.create_virtual_interface(full_name, &vif.name, &vif.interface_type) {

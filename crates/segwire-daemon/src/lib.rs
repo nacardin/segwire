@@ -8,3 +8,4 @@ pub mod policykit;
 
 mod netlink_raw;
 mod netns_raw;
+mod wireguard_raw;

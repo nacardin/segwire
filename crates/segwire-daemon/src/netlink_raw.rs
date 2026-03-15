@@ -54,7 +54,7 @@ fn open_netlink_socket() -> Result<OwnedFd, NetlinkError> {
 }
 
 /// Send a netlink message and collect all responses using a raw blocking socket.
-fn sync_netlink_request(
+pub(crate) fn sync_netlink_request(
     msg: NetlinkMessage<RouteNetlinkMessage>,
 ) -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, NetlinkError> {
     let fd = open_netlink_socket()?;

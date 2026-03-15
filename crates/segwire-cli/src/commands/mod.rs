@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 pub mod exec;
+pub mod import_wg;
 pub mod list;
 pub mod reload;
 pub mod restart;
@@ -37,4 +38,7 @@ pub enum Commands {
 
     /// Execute a command inside a network namespace
     Exec(exec::ExecArgs),
+
+    /// Import a WireGuard (wg-quick) config into a segwire namespace
+    ImportWg(import_wg::ImportWgArgs),
 }

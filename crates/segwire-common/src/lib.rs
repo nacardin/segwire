@@ -11,6 +11,7 @@ pub mod logging;
 pub mod netlink;
 pub mod security;
 pub mod utils;
+pub mod wireguard;
 
 #[cfg(test)]
 mod logging_test;

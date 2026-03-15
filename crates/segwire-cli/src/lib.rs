@@ -22,6 +22,11 @@ where
         return commands::validate::execute(args);
     }
 
+    // Handle import-wg command — purely local, no D-Bus needed
+    if let Commands::ImportWg(args) = cli.command {
+        return commands::import_wg::execute(args);
+    }
+
     // Create D-Bus client for all other operations
     let client = match dbus_client::DbusClient::new() {
         Ok(client) => client,
@@ -43,6 +48,7 @@ where
         Commands::Reload(args) => commands::reload::execute(client, args),
         Commands::Restart(args) => commands::restart::execute(client, args),
         Commands::Validate(_) => unreachable!("handled above"),
+        Commands::ImportWg(_) => unreachable!("handled above"),
         Commands::Exec(args) => commands::exec::execute(client, args),
     }
 }

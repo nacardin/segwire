@@ -17,6 +17,9 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 
+# Key encoding/decoding
+base64 = { workspace = true }
+
 # Validation
 regex = { workspace = true }
 

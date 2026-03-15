@@ -3,6 +3,7 @@
 //! Defines TOML configuration structures for both daemon and namespace
 //! configurations, with validation and environment variable substitution.
 
+use base64::Engine;
 use crate::error::{ConfigError, SegwireResult};
 use crate::utils::{
     validate_cidr, validate_domain_name, validate_interface_name, validate_ip_address,
@@ -95,6 +96,9 @@ pub struct NamespaceConfig {
     pub routing: RoutingConfig,
     #[serde(default)]
     pub dns: DnsConfig,
+    /// WireGuard tunnel configuration (optional)
+    #[serde(default)]
+    pub wireguard: Option<WireguardConfig>,
     #[serde(default)]
     pub environment: HashMap<String, String>,
 }
@@ -162,6 +166,48 @@ pub struct DnsConfig {
     /// Search domains
     #[serde(default)]
     pub search: Vec<String>,
+}
+
+/// WireGuard tunnel configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WireguardConfig {
+    /// Base64-encoded private key (from `wg genkey`)
+    pub private_key: String,
+
+    /// UDP listen port (0 = kernel picks random)
+    #[serde(default)]
+    pub listen_port: u16,
+
+    /// Firewall mark
+    #[serde(default)]
+    pub fwmark: u32,
+
+    /// Peer configurations
+    #[serde(default)]
+    pub peers: Vec<WireguardPeerConfig>,
+}
+
+/// WireGuard peer definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireguardPeerConfig {
+    /// Base64-encoded public key
+    pub public_key: String,
+
+    /// Optional base64-encoded preshared key
+    #[serde(default)]
+    pub preshared_key: Option<String>,
+
+    /// Endpoint in host:port format (e.g. "vpn.example.com:51820" or "1.2.3.4:51820")
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// Allowed IP ranges in CIDR notation
+    #[serde(default)]
+    pub allowed_ips: Vec<String>,
+
+    /// Persistent keepalive interval in seconds (0 = disabled)
+    #[serde(default)]
+    pub persistent_keepalive: u16,
 }
 
 // Default value functions
@@ -249,7 +295,7 @@ impl VirtualInterface {
         })?;
 
         // Validate interface type
-        let valid_types = ["veth", "bridge", "dummy", "macvlan", "ipvlan"];
+        let valid_types = ["veth", "bridge", "dummy", "macvlan", "ipvlan", "wireguard"];
         if !valid_types.contains(&self.interface_type.as_str()) {
             return Err(ConfigError::InvalidValue {
                 field: "interfaces.virtual.type".to_string(),
@@ -416,6 +462,121 @@ impl DnsConfig {
     }
 }
 
+impl WireguardConfig {
+    /// Validate WireGuard configuration
+    pub fn validate(&self) -> SegwireResult<()> {
+        // Validate private key (must be valid base64, decoding to 32 bytes)
+        Self::validate_wg_key(&self.private_key, "wireguard.private_key")?;
+
+        // Validate all peers
+        for (index, peer) in self.peers.iter().enumerate() {
+            peer.validate().map_err(|e| match e {
+                crate::error::SegwireError::Config(config_err) => match config_err {
+                    ConfigError::InvalidValue { field, value } => {
+                        crate::error::SegwireError::Config(ConfigError::InvalidValue {
+                            field: format!("wireguard.peers[{}].{}", index, field),
+                            value,
+                        })
+                    }
+                    other => crate::error::SegwireError::Config(other),
+                },
+                other => other,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate a base64-encoded WireGuard key (must decode to exactly 32 bytes)
+    fn validate_wg_key(key: &str, field_name: &str) -> SegwireResult<()> {
+        if key.is_empty() {
+            return Err(ConfigError::MissingField(field_name.to_string()).into());
+        }
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(key)
+            .map_err(|_| ConfigError::InvalidValue {
+                field: field_name.to_string(),
+                value: "invalid base64 encoding".to_string(),
+            })?;
+
+        if decoded.len() != 32 {
+            return Err(ConfigError::InvalidValue {
+                field: field_name.to_string(),
+                value: format!(
+                    "key must be 32 bytes (got {} bytes after base64 decode)",
+                    decoded.len()
+                ),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+}
+
+impl WireguardPeerConfig {
+    /// Validate a single WireGuard peer configuration
+    pub fn validate(&self) -> SegwireResult<()> {
+        // Validate public key
+        WireguardConfig::validate_wg_key(&self.public_key, "public_key")?;
+
+        // Validate preshared key if present
+        if let Some(ref psk) = self.preshared_key {
+            WireguardConfig::validate_wg_key(psk, "preshared_key")?;
+        }
+
+        // Validate endpoint format (host:port)
+        if let Some(ref endpoint) = self.endpoint {
+            Self::validate_endpoint(endpoint)?;
+        }
+
+        // Validate allowed IPs (must be valid CIDR)
+        for (i, ip) in self.allowed_ips.iter().enumerate() {
+            validate_cidr(ip).map_err(|_| ConfigError::InvalidValue {
+                field: format!("allowed_ips[{}]", i),
+                value: ip.clone(),
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate endpoint format: "host:port" where port is a valid u16
+    fn validate_endpoint(endpoint: &str) -> SegwireResult<()> {
+        // Find the last colon (to handle IPv6 addresses like [::1]:51820)
+        let last_colon = endpoint.rfind(':').ok_or_else(|| ConfigError::InvalidValue {
+            field: "endpoint".to_string(),
+            value: format!("expected host:port format, got '{}'", endpoint),
+        })?;
+
+        let port_str = &endpoint[last_colon + 1..];
+        let port: u16 = port_str.parse().map_err(|_| ConfigError::InvalidValue {
+            field: "endpoint".to_string(),
+            value: format!("invalid port '{}' in endpoint '{}'", port_str, endpoint),
+        })?;
+
+        if port == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "endpoint".to_string(),
+                value: "port cannot be 0".to_string(),
+            }
+            .into());
+        }
+
+        let host = &endpoint[..last_colon];
+        if host.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: "endpoint".to_string(),
+                value: "host part of endpoint is empty".to_string(),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+}
+
 impl LoggingConfig {
     /// Validate logging configuration
     pub fn validate(&self) -> SegwireResult<()> {
@@ -540,6 +701,24 @@ impl NamespaceConfig {
             *domain = substitute_env_vars(domain, &self.environment)?;
         }
 
+        // Substitute in WireGuard configuration
+        if let Some(ref mut wg) = self.wireguard {
+            wg.private_key = substitute_env_vars(&wg.private_key, &self.environment)?;
+
+            for peer in &mut wg.peers {
+                peer.public_key = substitute_env_vars(&peer.public_key, &self.environment)?;
+                if let Some(ref mut psk) = peer.preshared_key {
+                    *psk = substitute_env_vars(psk, &self.environment)?;
+                }
+                if let Some(ref mut endpoint) = peer.endpoint {
+                    *endpoint = substitute_env_vars(endpoint, &self.environment)?;
+                }
+                for ip in &mut peer.allowed_ips {
+                    *ip = substitute_env_vars(ip, &self.environment)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -556,6 +735,11 @@ impl NamespaceConfig {
 
         // Validate DNS configuration
         self.dns.validate()?;
+
+        // Validate WireGuard configuration
+        if let Some(ref wg) = self.wireguard {
+            wg.validate()?;
+        }
 
         Ok(())
     }
@@ -638,6 +822,7 @@ mod tests {
                 search: vec!["example.com".to_string()],
             },
             environment: env_vars,
+            wireguard: None,
         };
 
         // Test serialization
@@ -723,6 +908,7 @@ config_dir = "/tmp"
             routing: RoutingConfig::default(),
             dns: DnsConfig::default(),
             environment: HashMap::new(),
+            wireguard: None,
         };
 
         // Should fail validation with empty name
@@ -889,6 +1075,7 @@ config_dir = "/tmp"
                 search: vec!["${APP_NAME}.local".to_string()],
             },
             environment: env_vars,
+            wireguard: None,
         };
 
         // Perform substitution
@@ -941,6 +1128,7 @@ config_dir = "/tmp"
                 search: vec![],
             },
             environment: env_vars,
+            wireguard: None,
         };
 
         // Perform substitution
@@ -970,6 +1158,7 @@ config_dir = "/tmp"
             routing: RoutingConfig::default(),
             dns: DnsConfig::default(),
             environment: env_vars,
+            wireguard: None,
         };
 
         // Should fail with missing variable
@@ -996,6 +1185,7 @@ config_dir = "/tmp"
             routing: RoutingConfig::default(),
             dns: DnsConfig::default(),
             environment: env_vars,
+            wireguard: None,
         };
 
         // Should use system environment variable
@@ -1027,6 +1217,7 @@ config_dir = "/tmp"
             routing: RoutingConfig::default(),
             dns: DnsConfig::default(),
             environment: env_vars,
+            wireguard: None,
         };
 
         // Should use config environment variable over system
@@ -1035,5 +1226,108 @@ config_dir = "/tmp"
 
         // Clean up
         std::env::remove_var("SEGWIRE_TEST_PRECEDENCE_VAR");
+    }
+
+    // -----------------------------------------------------------------------
+    // WireGuard config validation tests
+    // -----------------------------------------------------------------------
+
+    /// Generate a valid 32-byte base64 key for tests.
+    fn wg_test_key(fill: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([fill; 32])
+    }
+
+    #[test]
+    fn test_wireguard_config_valid() {
+        let config = WireguardConfig {
+            private_key: wg_test_key(0x42),
+            listen_port: 51820,
+            fwmark: 0,
+            peers: vec![WireguardPeerConfig {
+                public_key: wg_test_key(0x43),
+                preshared_key: None,
+                endpoint: Some("203.0.113.1:51820".to_string()),
+                allowed_ips: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+                persistent_keepalive: 25,
+            }],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_wireguard_config_invalid_base64_key() {
+        let config = WireguardConfig {
+            private_key: "not-valid-base64!!!".to_string(),
+            listen_port: 0,
+            fwmark: 0,
+            peers: vec![],
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid base64"));
+    }
+
+    #[test]
+    fn test_wireguard_config_wrong_key_length() {
+        // 16-byte key instead of 32
+        let short_key = base64::engine::general_purpose::STANDARD.encode([0x42u8; 16]);
+        let config = WireguardConfig {
+            private_key: short_key,
+            listen_port: 0,
+            fwmark: 0,
+            peers: vec![],
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn test_wireguard_config_empty_private_key() {
+        let config = WireguardConfig {
+            private_key: String::new(),
+            listen_port: 0,
+            fwmark: 0,
+            peers: vec![],
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wireguard_peer_invalid_endpoint() {
+        let config = WireguardConfig {
+            private_key: wg_test_key(0x42),
+            listen_port: 0,
+            fwmark: 0,
+            peers: vec![WireguardPeerConfig {
+                public_key: wg_test_key(0x43),
+                preshared_key: None,
+                endpoint: Some("not-a-valid-endpoint".to_string()),
+                allowed_ips: vec!["10.0.0.0/8".to_string()],
+                persistent_keepalive: 0,
+            }],
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("endpoint"));
+    }
+
+    #[test]
+    fn test_wireguard_peer_invalid_allowed_ip() {
+        let config = WireguardConfig {
+            private_key: wg_test_key(0x42),
+            listen_port: 0,
+            fwmark: 0,
+            peers: vec![WireguardPeerConfig {
+                public_key: wg_test_key(0x43),
+                preshared_key: None,
+                endpoint: None,
+                allowed_ips: vec!["not-a-cidr".to_string()],
+                persistent_keepalive: 0,
+            }],
+        };
+        let result = config.validate();
+        assert!(result.is_err());
     }
 }

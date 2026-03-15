@@ -29,10 +29,15 @@ thiserror = "1.0"
 regex = "1.0"
 
 # Network namespace management
-
 netlink-packet-route = "0.25"
 netlink-packet-core = "0.8"
 nix = { version = "0.27", features = ["user", "process", "sched", "mount", "fs", "socket", "signal"] }
+
+# WireGuard support
+netlink-packet-wireguard = "0.3"
+netlink-packet-generic = "0.3"
+netlink-sys = "0.8"
+base64 = "0.22"
 
 # Logging
 tracing = "0.1"

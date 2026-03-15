@@ -414,6 +414,67 @@ impl NetlinkManager {
         result.map_err(|e| e.into())
     }
 
+    /// Create a WireGuard interface inside a namespace.
+    pub fn create_wireguard_interface(
+        &self,
+        namespace_name: &str,
+        wg_name: &str,
+    ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Created WireGuard interface '{}' in namespace '{}'",
+                wg_name, namespace_name
+            );
+            return Ok(());
+        }
+        segwire_common::utils::validate_namespace_name(namespace_name)?;
+        segwire_common::utils::validate_interface_name(wg_name)?;
+
+        if !self.namespace_exists(namespace_name)? {
+            return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
+        }
+
+        let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
+        let wg_name_clone = wg_name.to_string();
+
+        let result = netns_raw::run_in_namespace(&ns_path, move || {
+            crate::wireguard_raw::create_wireguard_interface_sync(&wg_name_clone)
+        })
+        .map_err(SegwireError::Network)?;
+
+        result.map_err(|e| e.into())
+    }
+
+    /// Configure a WireGuard device (keys, peers, endpoints) inside a namespace.
+    pub fn configure_wireguard(
+        &self,
+        namespace_name: &str,
+        wg_name: &str,
+        config: &segwire_common::config::WireguardConfig,
+    ) -> SegwireResult<()> {
+        if self.is_simulated() {
+            info!(
+                "[SIM] Configured WireGuard device '{}' in namespace '{}' ({} peers)",
+                wg_name,
+                namespace_name,
+                config.peers.len()
+            );
+            return Ok(());
+        }
+        segwire_common::utils::validate_namespace_name(namespace_name)?;
+
+        let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
+        let wg_name_clone = wg_name.to_string();
+        let config_clone = config.clone();
+
+        let result = netns_raw::run_in_namespace(&ns_path, move || {
+            crate::wireguard_raw::configure_wireguard_device(&wg_name_clone, &config_clone)
+        })
+        .map_err(SegwireError::Network)?;
+
+        result.map_err(SegwireError::Network)
+    }
+
     /// Create a virtual ethernet (veth) pair.
     pub fn create_veth_pair(&self, veth_name: &str, peer_name: &str) -> SegwireResult<()> {
         if self.is_simulated() {
