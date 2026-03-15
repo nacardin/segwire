@@ -26,5 +26,8 @@ tracing-subscriber = { workspace = true }
 # Error handling
 anyhow = { workspace = true }
 
+# Configuration parsing
+toml = { workspace = true }
+
 # Test serialization (daemon tests share a D-Bus name)
 serial_test = "3"

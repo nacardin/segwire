@@ -10,7 +10,7 @@ use crate::config::{ConfigFileEvent, ConfigManager};
 use crate::dbus_service::DbusService;
 use crate::namespace_state::NamespaceStateManager;
 use async_lock::Mutex;
-use segwire_common::{log_info, LogContext, SegwireResult};
+use segwire_common::{log_info, DaemonConfig, LogContext, SegwireResult};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -43,20 +43,24 @@ impl DaemonEventLoop {
     /// Create a new daemon event loop
     ///
     /// # Arguments
+    /// * `daemon_config` - The already-loaded daemon configuration
     /// * `config_path` - Path to the master daemon configuration file
     ///
     /// # Returns
     /// A new `DaemonEventLoop` instance ready to run
-    pub async fn new(config_path: PathBuf) -> SegwireResult<Self> {
+    pub async fn new(daemon_config: DaemonConfig, config_path: PathBuf) -> SegwireResult<Self> {
         let ctx = LogContext::new("daemon_initialization").with_config_path(config_path.clone());
 
         log_info!(ctx, "Initializing daemon event loop");
 
         // Note: Capability/privilege checks are done in main() before reaching here.
 
-        // Initialize configuration manager
-        let config_manager = Arc::new(Mutex::new(ConfigManager::new(config_path.clone())?));
-        log_info!(ctx, "Configuration loaded successfully");
+        // Initialize configuration manager from the already-loaded config
+        let config_manager = Arc::new(Mutex::new(ConfigManager::from_config(
+            daemon_config,
+            config_path,
+        )));
+        log_info!(ctx, "Configuration manager initialized");
 
         // Initialize namespace state manager FIRST
         let state_manager = Arc::new(Mutex::new(NamespaceStateManager::new_auto().await?));
@@ -648,7 +652,10 @@ object_path = "/org/segwire/NamespaceManager"
         let config_path = create_test_daemon_config(&temp_dir, "test");
 
         // Test that we can create a daemon event loop
-        let result = DaemonEventLoop::new(config_path).await;
+        let config_content = std::fs::read_to_string(&config_path).expect("Failed to read config");
+        let daemon_config: DaemonConfig =
+            toml::from_str(&config_content).expect("Failed to parse config");
+        let result = DaemonEventLoop::new(daemon_config, config_path).await;
 
         // The creation might fail due to D-Bus system bus not being available in test environment
         // but we can at least verify the basic structure works

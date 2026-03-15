@@ -59,7 +59,7 @@ async fn main() -> SegwireResult<()> {
     );
 
     // Create and run the daemon event loop
-    let daemon = DaemonEventLoop::new(config_path).await?;
+    let daemon = DaemonEventLoop::new(daemon_config, config_path).await?;
     daemon.run().await?;
 
     info!("Segwire daemon stopped");

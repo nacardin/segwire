@@ -19,7 +19,6 @@ serde = { workspace = true }
 
 # Output formatting
 tabled = { workspace = true }
-serde_json = { workspace = true }
 
 # Configuration parsing
 toml = { workspace = true }

@@ -42,7 +42,7 @@ pub struct NamespaceConfigEntry {
 }
 
 impl ConfigManager {
-    /// Create a new configuration manager
+    /// Create a new configuration manager by loading the config from disk.
     pub fn new(config_file_path: PathBuf) -> SegwireResult<Self> {
         info!(
             "Loading daemon configuration from: {}",
@@ -62,6 +62,24 @@ impl ConfigManager {
             config_file_path,
             namespace_configs: HashMap::new(),
         })
+    }
+
+    /// Create a new configuration manager from an already-loaded config.
+    ///
+    /// This avoids a redundant re-parse of the config file when the caller has
+    /// already loaded it (e.g. `main()` reads the config for logging setup).
+    pub fn from_config(daemon_config: DaemonConfig, config_file_path: PathBuf) -> Self {
+        info!(
+            "Configuration manager initialized. Namespace prefix: '{}', Config directory: '{}'",
+            daemon_config.daemon.namespace_prefix,
+            daemon_config.daemon.config_dir.display()
+        );
+
+        Self {
+            daemon_config,
+            config_file_path,
+            namespace_configs: HashMap::new(),
+        }
     }
 
     /// Load master daemon configuration from file

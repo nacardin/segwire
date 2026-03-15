@@ -5,6 +5,7 @@
 //! `DbusClient` to run CLI operations against it.
 
 use anyhow::Result;
+use segwire_common::DaemonConfig;
 use segwire_daemon::event_loop::DaemonEventLoop;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -93,7 +94,9 @@ object_path = "{}"
     ///
     /// Returns a `DaemonEventLoop` that can be used to interact with the daemon.
     pub async fn start_daemon(&self) -> Result<DaemonEventLoop> {
-        let event_loop = DaemonEventLoop::new(self.config_path.clone()).await?;
+        let config_content = std::fs::read_to_string(&self.config_path)?;
+        let daemon_config: DaemonConfig = toml::from_str(&config_content)?;
+        let event_loop = DaemonEventLoop::new(daemon_config, self.config_path.clone()).await?;
         Ok(event_loop)
     }
 
