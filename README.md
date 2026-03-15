@@ -1,8 +1,32 @@
 # Segwire
 
-**Declarative Linux network namespace management, without the `sudo` dance.**
+**Segment your network with WireGuard — per-app VPN isolation on Linux.**
 
-Segwire is a daemon + CLI tool that lets you define network namespaces in TOML config files and manages their full lifecycle — creation, interface setup, routing, DNS, live-reload, and unprivileged command execution inside namespaces.
+Segwire (**seg**mented + **wire**guard) lets you run applications inside isolated network namespaces, each with its own WireGuard tunnel, routing table, and DNS. Traffic from one namespace never leaks into another or onto the host's default route.
+
+### Why?
+
+On a standard Linux desktop, every application shares the same network stack. If you connect to a VPN, *everything* goes through it. If the VPN drops, traffic silently falls back to your ISP. Segwire solves this by giving each network environment its own namespace:
+
+- **Privacy VPN** — run a browser inside a namespace tunneled through a VPN provider. The browser on your host is completely unaffected, and if the tunnel drops, the namespaced browser has *no route out* — zero leakage.
+- **Multi-provider routing** — connect to different VPN endpoints simultaneously: one namespace for work, another for personal browsing, a third for a specific region.
+- **Application isolation** — confine an application's network access to a specific interface or subnet without firewall rules.
+- **Development & testing** — spin up network environments with controlled routing and DNS for integration testing, without touching the host network.
+
+### How it works
+
+You declare namespaces in TOML config files. The segwire daemon manages their lifecycle — creating the namespace, setting up veth pairs or moving interfaces, assigning addresses, configuring routes and DNS. You then run commands inside any namespace with `segwire exec`, which works without `sudo` (even for GUI apps like Firefox) thanks to a minimal setuid helper.
+
+```bash
+# Run Firefox through your privacy VPN
+segwire exec privacy-vpn -- firefox
+
+# Check your exit IP from inside the namespace
+segwire exec privacy-vpn -- curl ifconfig.me
+
+# Meanwhile, the host is unaffected
+curl ifconfig.me   # shows your real IP
+```
 
 ## Features
 
@@ -114,4 +138,4 @@ segwire exec vpn -- curl ifconfig.me
 
 ## License
 
-<!-- TODO: Add license -->
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0-only). See the [LICENSE](LICENSE) file for details.
