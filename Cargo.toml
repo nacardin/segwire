@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/segwire-daemon", "crates/segwire-cli", "crates/segwire-common", "crates/segwire-test", "crates/segwire-ns-enter"]
+members = ["crates/segwire-daemon", "crates/segwire-cli", "crates/segwire-common", "crates/segwire-netlink", "crates/segwire-test", "crates/segwire-ns-enter"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -45,5 +45,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Internal crates
 segwire-common = { path = "crates/segwire-common" }
+segwire-netlink = { path = "crates/segwire-netlink" }
 
 

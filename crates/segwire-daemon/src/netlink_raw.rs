@@ -1,22 +1,19 @@
-//! Low-level netlink socket helpers.
+//! Route Netlink operations for network namespace management.
 //!
-//! This module owns **all** netlink protocol interactions:
-//! - Sync operations use a raw blocking `AF_NETLINK` socket via `nix`
-//! - Message serialization/deserialization uses `netlink-packet-core` +
-//!   `netlink-packet-route`
+//! This module builds and sends typed Route Netlink messages via
+//! [`segwire_netlink::NetlinkSocket`].  Each function opens a fresh socket,
+//! which means it captures the calling thread's current network namespace.
 //!
 //! Namespace lifecycle syscalls (`unshare`, `setns`, `mount`, etc.) live in the
-//! companion [`crate::netns_raw`] module.  This file contains **zero** manual
-//! netlink serialization — everything goes through the `netlink-packet-*`
-//! crates for message building/parsing.
+//! companion [`crate::netns_raw`] module.
 
 use crate::netns_raw;
 use netlink_packet_core::{
-    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REQUEST,
+    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL,
 };
 use netlink_packet_route::{
     address::{AddressAttribute, AddressMessage},
-    link::{LinkFlags, InfoData, InfoKind, InfoVeth, LinkAttribute, LinkInfo, LinkMessage},
+    link::{InfoData, InfoKind, InfoVeth, LinkAttribute, LinkFlags, LinkInfo, LinkMessage},
     route::{
         RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
         RouteType,
@@ -24,113 +21,18 @@ use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
 };
 use segwire_common::netlink::NetlinkError;
+use segwire_netlink::{NetlinkProtocol, NetlinkSocket};
 use std::net::IpAddr;
-use std::os::fd::{AsRawFd, OwnedFd};
 
 // ---------------------------------------------------------------------------
-// Raw blocking netlink socket
-// ---------------------------------------------------------------------------
-
-/// Open a raw `AF_NETLINK` / `NETLINK_ROUTE` socket bound to the kernel.
-fn open_netlink_socket() -> Result<OwnedFd, NetlinkError> {
-    use nix::sys::socket::{
-        bind, socket, AddressFamily, NetlinkAddr, SockFlag, SockProtocol, SockType,
-    };
-
-    let fd = socket(
-        AddressFamily::Netlink,
-        SockType::Datagram,
-        SockFlag::SOCK_CLOEXEC,
-        SockProtocol::NetlinkRoute,
-    )
-    .map_err(|e| NetlinkError::SocketError(format!("socket() failed: {}", e)))?;
-
-    // Bind to PID 0 (kernel auto-assigns) and multicast groups 0
-    let addr = NetlinkAddr::new(0, 0);
-    bind(fd.as_raw_fd(), &addr)
-        .map_err(|e| NetlinkError::SocketError(format!("bind() failed: {}", e)))?;
-
-    Ok(fd)
-}
-
-/// Send a netlink message and collect all responses using a raw blocking socket.
-pub(crate) fn sync_netlink_request(
-    msg: NetlinkMessage<RouteNetlinkMessage>,
-) -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, NetlinkError> {
-    let fd = open_netlink_socket()?;
-
-    // Serialize message
-    let mut buf = vec![0u8; msg.header.length as usize];
-    msg.serialize(&mut buf);
-
-    // Send
-    nix::sys::socket::send(fd.as_raw_fd(), &buf, nix::sys::socket::MsgFlags::empty())
-        .map_err(|e| NetlinkError::SocketError(format!("send() failed: {}", e)))?;
-
-    // Receive responses
-    let mut responses = Vec::new();
-    let mut recv_buf = vec![0u8; 65536];
-
-    loop {
-        let n = nix::sys::socket::recv(
-            fd.as_raw_fd(),
-            &mut recv_buf,
-            nix::sys::socket::MsgFlags::empty(),
-        )
-        .map_err(|e| NetlinkError::SocketError(format!("recv() failed: {}", e)))?;
-
-        if n == 0 {
-            break;
-        }
-
-        let mut offset = 0;
-        while offset < n {
-            let msg_buf = &recv_buf[offset..n];
-            let parsed: NetlinkMessage<RouteNetlinkMessage> = NetlinkMessage::deserialize(msg_buf)
-                .map_err(|e| NetlinkError::ProtocolError(format!("deserialize failed: {}", e)))?;
-
-            let len = parsed.header.length as usize;
-            if len == 0 {
-                // Avoid infinite loop on zero-length messages
-                break;
-            }
-
-            match &parsed.payload {
-                NetlinkPayload::Done(_) => {
-                    return Ok(responses);
-                }
-                NetlinkPayload::Error(err_msg) => {
-                    // Error code None means ACK (success), Some(code) is actual error
-                    if let Some(code) = err_msg.code {
-                        return Err(NetlinkError::ProtocolError(format!(
-                            "netlink error: code {}",
-                            code.get()
-                        )));
-                    }
-                    // ACK — we're done for non-dump requests
-                    return Ok(responses);
-                }
-                _ => {
-                    responses.push(parsed);
-                }
-            }
-
-            offset += len;
-        }
-    }
-
-    Ok(responses)
-}
-
-// ---------------------------------------------------------------------------
-// Link operations — sync (for use inside namespace thread closures)
+// Link operations
 // ---------------------------------------------------------------------------
 
 /// Dump all links and return their interface names, using a fresh socket.
 ///
 /// Used inside closures that run in a different namespace.
 pub(crate) fn dump_interface_names_fresh() -> Result<Vec<String>, String> {
-    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let responses = dump_links().map_err(|e| e.to_string())?;
     Ok(extract_interface_names(&responses))
 }
 
@@ -139,7 +41,7 @@ pub(crate) fn dump_interface_names_fresh() -> Result<Vec<String>, String> {
 /// Used inside closures that run in a different namespace.
 #[allow(dead_code)]
 pub(crate) fn get_interface_index_fresh(name: &str) -> Result<u32, String> {
-    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let responses = dump_links().map_err(|e| e.to_string())?;
     extract_interface_index(&responses, name).map_err(|e| e.to_string())
 }
 
@@ -148,7 +50,7 @@ pub(crate) fn get_interface_index_fresh(name: &str) -> Result<u32, String> {
 /// Opens a fresh socket, resolves the interface index, opens /proc/1/ns/net,
 /// sends the SetLink, closes everything.
 pub(crate) fn move_interface_to_default_ns(interface_name: &str) -> Result<(), String> {
-    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let responses = dump_links().map_err(|e| e.to_string())?;
     let ifindex = extract_interface_index(&responses, interface_name).map_err(|e| e.to_string())?;
 
     let default_ns_fd = netns_raw::open_ns_fd("/proc/1/ns/net")
@@ -159,10 +61,10 @@ pub(crate) fn move_interface_to_default_ns(interface_name: &str) -> Result<(), S
     msg.attributes.push(LinkAttribute::NetNsFd(default_ns_fd));
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK;
 
-    let result = sync_netlink_request(nl_msg).map_err(|e| e.to_string());
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route).map_err(|e| e.to_string())?;
+    let result = sock.request(nl_msg).map_err(|e| e.to_string());
     netns_raw::close_fd(default_ns_fd);
     result?;
     Ok(())
@@ -171,7 +73,7 @@ pub(crate) fn move_interface_to_default_ns(interface_name: &str) -> Result<(), S
 /// Move an interface to a namespace identified by ns file path (sync).
 ///
 /// Opens the namespace fd, sends SetLink, closes the fd.
-pub(crate) fn move_interface_to_ns_sync(ifindex: u32, ns_path: &str) -> Result<(), String> {
+pub(crate) fn move_interface_to_ns(ifindex: u32, ns_path: &str) -> Result<(), String> {
     let ns_fd = netns_raw::open_ns_fd(ns_path)?;
 
     let mut msg = LinkMessage::default();
@@ -179,17 +81,17 @@ pub(crate) fn move_interface_to_ns_sync(ifindex: u32, ns_path: &str) -> Result<(
     msg.attributes.push(LinkAttribute::NetNsFd(ns_fd));
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK;
 
-    let result = sync_netlink_request(nl_msg).map_err(|e| e.to_string());
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route).map_err(|e| e.to_string())?;
+    let result = sock.request(nl_msg).map_err(|e| e.to_string());
     netns_raw::close_fd(ns_fd);
     result?;
     Ok(())
 }
 
 /// Create a veth pair (sync).
-pub(crate) fn create_veth_pair_sync(veth_name: &str, peer_name: &str) -> Result<(), NetlinkError> {
+pub(crate) fn create_veth_pair(veth_name: &str, peer_name: &str) -> Result<(), NetlinkError> {
     let mut peer_msg = LinkMessage::default();
     peer_msg
         .attributes
@@ -204,15 +106,15 @@ pub(crate) fn create_veth_pair_sync(veth_name: &str, peer_name: &str) -> Result<
     ]));
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
-    sync_netlink_request(nl_msg)?;
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route)?;
+    sock.request(nl_msg)?;
     Ok(())
 }
 
 /// Create a generic virtual interface (dummy, bridge, macvlan, ipvlan) (sync).
-pub(crate) fn create_virtual_interface_sync(
+pub(crate) fn create_virtual_interface(
     name: &str,
     kind_str: &str,
 ) -> Result<(), NetlinkError> {
@@ -221,31 +123,32 @@ pub(crate) fn create_virtual_interface_sync(
         "bridge" => InfoKind::Bridge,
         "macvlan" => InfoKind::MacVlan,
         "ipvlan" => InfoKind::IpVlan,
-        _ => return Err(NetlinkError::ProtocolError(format!("unsupported virtual interface type: {}", kind_str))),
+        _ => {
+            return Err(NetlinkError::ProtocolError(format!(
+                "unsupported virtual interface type: {}",
+                kind_str
+            )))
+        }
     };
 
     let mut msg = LinkMessage::default();
     msg.attributes.push(LinkAttribute::IfName(name.to_string()));
-    msg.attributes.push(LinkAttribute::LinkInfo(vec![
-        LinkInfo::Kind(kind),
-    ]));
+    msg.attributes
+        .push(LinkAttribute::LinkInfo(vec![LinkInfo::Kind(kind)]));
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
-    sync_netlink_request(nl_msg)?;
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route)?;
+    sock.request(nl_msg)?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Route operations — sync (always run inside namespace thread closures)
+// Route operations
 // ---------------------------------------------------------------------------
 
 /// Route parameters for building a netlink route message.
-///
-/// This is a simple struct that mirrors `RouteConfig` but uses parsed network
-/// types so the raw module doesn't depend on high-level validation logic.
 pub(crate) struct RawRouteParams {
     pub destination: String,
     pub gateway: String,
@@ -263,12 +166,8 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
     msg.header.scope = RouteScope::Universe;
     msg.header.kind = RouteType::Unicast;
 
-    // Determine address family from destination/gateway.
-    // We'll detect it from the first successfully parsed IP and
-    // default to Inet for "default" routes without an explicit gateway.
     let mut detected_family: Option<AddressFamily> = None;
 
-    // Helper closure to convert an IpAddr into a RouteAddress.
     fn ip_to_route_addr(ip: IpAddr) -> RouteAddress {
         match ip {
             IpAddr::V4(v4) => RouteAddress::Inet(v4),
@@ -298,7 +197,6 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
         msg.attributes
             .push(RouteAttribute::Destination(ip_to_route_addr(ip)));
     } else {
-        // Single host route
         let ip: IpAddr = params
             .destination
             .parse()
@@ -334,16 +232,16 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
 
     // Output interface
     if let Some(ref iface) = params.interface {
-        let responses = dump_links_sync().map_err(|e| e.to_string())?;
+        let responses = dump_links().map_err(|e| e.to_string())?;
         let ifindex = extract_interface_index(&responses, iface).map_err(|e| e.to_string())?;
         msg.attributes.push(RouteAttribute::Oif(ifindex));
     }
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
-    sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route).map_err(|e| e.to_string())?;
+    sock.request(nl_msg).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -351,6 +249,7 @@ pub(crate) fn add_route_fresh(params: RawRouteParams) -> Result<(), String> {
 ///
 /// Designed to be called inside a namespace closure.
 pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route).map_err(|e| e.to_string())?;
     let mut routes = Vec::new();
 
     for family in [AddressFamily::Inet, AddressFamily::Inet6] {
@@ -358,13 +257,13 @@ pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
         msg.header.address_family = family;
 
         let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::GetRoute(msg));
-        nl_msg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
-        nl_msg.finalize();
+        nl_msg.header.flags |= NLM_F_DUMP;
 
-        let responses = sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+        let responses = sock.request(nl_msg).map_err(|e| e.to_string())?;
 
         for resp in responses {
-            if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route_msg)) = resp.payload
+            if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route_msg)) =
+                resp.payload
             {
                 routes.push(format_route(&route_msg));
             }
@@ -374,14 +273,14 @@ pub(crate) fn dump_routes_fresh() -> Result<Vec<String>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Address operations — sync (for use inside namespace thread closures)
+// Address operations
 // ---------------------------------------------------------------------------
 
 /// Add an IP address (IPv4 or IPv6) to an interface, opening a fresh socket.
 ///
 /// Designed to be called inside a namespace closure.
 pub(crate) fn add_address_fresh(ifname: &str, addr: IpAddr, prefix_len: u8) -> Result<(), String> {
-    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let responses = dump_links().map_err(|e| e.to_string())?;
     let ifindex = extract_interface_index(&responses, ifname).map_err(|e| e.to_string())?;
 
     let family = match addr {
@@ -397,10 +296,10 @@ pub(crate) fn add_address_fresh(ifname: &str, addr: IpAddr, prefix_len: u8) -> R
     msg.attributes.push(AddressAttribute::Address(addr));
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
-    sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route).map_err(|e| e.to_string())?;
+    sock.request(nl_msg).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -408,7 +307,7 @@ pub(crate) fn add_address_fresh(ifname: &str, addr: IpAddr, prefix_len: u8) -> R
 ///
 /// Designed to be called inside a namespace closure.
 pub(crate) fn set_link_up_fresh(ifname: &str) -> Result<(), String> {
-    let responses = dump_links_sync().map_err(|e| e.to_string())?;
+    let responses = dump_links().map_err(|e| e.to_string())?;
     let ifindex = extract_interface_index(&responses, ifname).map_err(|e| e.to_string())?;
 
     let mut msg = LinkMessage::default();
@@ -417,10 +316,10 @@ pub(crate) fn set_link_up_fresh(ifname: &str) -> Result<(), String> {
     msg.header.change_mask = LinkFlags::Up;
 
     let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::SetLink(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-    nl_msg.finalize();
+    nl_msg.header.flags |= NLM_F_ACK;
 
-    sync_netlink_request(nl_msg).map_err(|e| e.to_string())?;
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route).map_err(|e| e.to_string())?;
+    sock.request(nl_msg).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -429,14 +328,14 @@ pub(crate) fn set_link_up_fresh(ifname: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Send a link dump request via a fresh socket.
-fn dump_links_sync() -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, NetlinkError> {
-    let msg = LinkMessage::default();
+fn dump_links() -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>, NetlinkError> {
+    let mut sock = NetlinkSocket::open(NetlinkProtocol::Route)?;
 
-    let mut nl_msg = NetlinkMessage::from(RouteNetlinkMessage::GetLink(msg));
-    nl_msg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
-    nl_msg.finalize();
+    let mut nl_msg =
+        NetlinkMessage::from(RouteNetlinkMessage::GetLink(LinkMessage::default()));
+    nl_msg.header.flags |= NLM_F_DUMP;
 
-    sync_netlink_request(nl_msg)
+    sock.request(nl_msg)
 }
 
 /// Extract interface names from a link dump response.

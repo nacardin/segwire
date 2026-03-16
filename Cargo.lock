@@ -107,18 +107,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
-name = "bytes"
-version = "1.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
-
-[[package]]
 name = "cfg-if"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -445,17 +433,6 @@ dependencies = [
 
 [[package]]
 name = "netlink-packet-core"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72724faf704479d67b388da142b186f916188505e7e0b26719019c525882eda4"
-dependencies = [
- "anyhow",
- "byteorder",
- "netlink-packet-utils",
-]
-
-[[package]]
-name = "netlink-packet-core"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3463cbb78394cb0141e2c926b93fc2197e473394b761986eca3b9da2c63ae0f4"
@@ -465,23 +442,11 @@ dependencies = [
 
 [[package]]
 name = "netlink-packet-generic"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cd7eb8ad331c84c6b8cb7f685b448133e5ad82e1ffd5acafac374af4a5a308b"
-dependencies = [
- "anyhow",
- "byteorder",
- "netlink-packet-core 0.7.0",
- "netlink-packet-utils",
-]
-
-[[package]]
-name = "netlink-packet-generic"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f891b2e0054cac5a684a06628f59568f841c93da4e551239da6e518f539e775"
 dependencies = [
- "netlink-packet-core 0.8.1",
+ "netlink-packet-core",
 ]
 
 [[package]]
@@ -493,19 +458,7 @@ dependencies = [
  "bitflags 2.9.1",
  "libc",
  "log",
- "netlink-packet-core 0.8.1",
-]
-
-[[package]]
-name = "netlink-packet-utils"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ede8a08c71ad5a95cdd0e4e52facd37190977039a4704eb82a283f713747d34"
-dependencies = [
- "anyhow",
- "byteorder",
- "paste",
- "thiserror",
+ "netlink-packet-core",
 ]
 
 [[package]]
@@ -516,19 +469,8 @@ checksum = "037892b0e01ce41f30398a47be2051e712a2cf1eed9cb7e5e6a92b05c423255b"
 dependencies = [
  "libc",
  "log",
- "netlink-packet-core 0.8.1",
- "netlink-packet-generic 0.4.0",
-]
-
-[[package]]
-name = "netlink-sys"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd6c30ed10fa69cc491d491b85cc971f6bdeb8e7367b7cde2ee6cc878d583fae"
-dependencies = [
- "bytes",
- "libc",
- "log",
+ "netlink-packet-core",
+ "netlink-packet-generic",
 ]
 
 [[package]]
@@ -849,19 +791,29 @@ dependencies = [
  "dbus",
  "dbus-crossroads",
  "inotify",
- "netlink-packet-core 0.8.1",
- "netlink-packet-generic 0.3.3",
+ "netlink-packet-core",
  "netlink-packet-route",
  "netlink-packet-wireguard",
- "netlink-sys",
  "nix 0.27.1",
  "segwire-common",
+ "segwire-netlink",
  "serde",
  "tempfile",
  "thiserror",
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "segwire-netlink"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "nix 0.27.1",
+ "segwire-common",
 ]
 
 [[package]]

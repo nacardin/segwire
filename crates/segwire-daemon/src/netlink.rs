@@ -313,7 +313,7 @@ impl NetlinkManager {
             .map_err(NetlinkError::SocketError)?;
 
         let ns_path = format!("{}/{}", NETNS_RUN_DIR, namespace_name);
-        netlink_raw::move_interface_to_ns_sync(ifindex, &ns_path).map_err(|e| {
+        netlink_raw::move_interface_to_ns(ifindex, &ns_path).map_err(|e| {
             NetlinkError::InterfaceMoveFailed(
                 interface_name.to_string(),
                 namespace_name.to_string(),
@@ -407,7 +407,7 @@ impl NetlinkManager {
         let vif_type_clone = vif_type.to_string();
 
         let result = netns_raw::run_in_namespace(&ns_path, move || {
-            netlink_raw::create_virtual_interface_sync(&vif_name_clone, &vif_type_clone)
+            netlink_raw::create_virtual_interface(&vif_name_clone, &vif_type_clone)
         })
         .map_err(SegwireError::Network)?;
 
@@ -438,7 +438,7 @@ impl NetlinkManager {
         let wg_name_clone = wg_name.to_string();
 
         let result = netns_raw::run_in_namespace(&ns_path, move || {
-            crate::wireguard_raw::create_wireguard_interface_sync(&wg_name_clone)
+            crate::wireguard_raw::create_wireguard_interface(&wg_name_clone)
         })
         .map_err(SegwireError::Network)?;
 
@@ -499,7 +499,7 @@ impl NetlinkManager {
             .into());
         }
 
-        netlink_raw::create_veth_pair_sync(veth_name, peer_name).map_err(|e| {
+        netlink_raw::create_veth_pair(veth_name, peer_name).map_err(|e| {
             NetlinkError::VirtualInterfaceCreateFailed(veth_name.to_string(), e.to_string())
         })?;
 

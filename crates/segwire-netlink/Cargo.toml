@@ -1,0 +1,18 @@
+[package]
+name = "segwire-netlink"
+version = "0.1.0"
+license = "GPL-3.0-only"
+edition = "2021"
+description = "Synchronous netlink socket for segwire"
+
+[dependencies]
+# Shared library (error types)
+segwire-common = { workspace = true }
+
+# Netlink message types (for typed request/response)
+netlink-packet-route = { workspace = true }
+netlink-packet-core = { workspace = true }
+
+# Socket creation + I/O
+nix = { workspace = true }
+libc = "0.2"
