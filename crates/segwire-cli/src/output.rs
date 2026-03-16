@@ -496,42 +496,16 @@ fn format_timestamp(unix_secs: u64) -> String {
     if unix_secs == 0 {
         return "-".to_string();
     }
-    // Produce a simple UTC representation:  YYYY-MM-DD HH:MM:SS UTC
-    // Without pulling in `chrono`, we do a rough calculation.
-    let secs_per_minute = 60u64;
-    let secs_per_hour = 3600u64;
-    let secs_per_day = 86400u64;
 
-    let days_since_epoch = unix_secs / secs_per_day;
-    let time_of_day = unix_secs % secs_per_day;
-
-    let hours = time_of_day / secs_per_hour;
-    let minutes = (time_of_day % secs_per_hour) / secs_per_minute;
-    let seconds = time_of_day % secs_per_minute;
-
-    // Convert days since epoch to Y-M-D (simplified Gregorian).
-    let (year, month, day) = days_to_ymd(days_since_epoch);
-
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    match time::OffsetDateTime::from_unix_timestamp(unix_secs as i64) {
+        Ok(dt) => {
+            let format = time::macros::format_description!(
+                "[year]-[month padding:zero]-[day padding:zero] [hour padding:zero]:[minute padding:zero]:[second padding:zero] UTC"
+            );
+            dt.format(&format).unwrap_or_else(|_| "-".to_string())
+        }
+        Err(_) => "-".to_string(),
+    }
 }
 
 /// Format a duration in seconds as a human-friendly string.

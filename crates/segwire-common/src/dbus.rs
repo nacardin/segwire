@@ -342,7 +342,6 @@ pub mod interface {
     /// Method names as constants
     pub const METHOD_LIST_NAMESPACES: &str = "ListNamespaces";
     pub const METHOD_GET_NAMESPACE_STATUS: &str = "GetNamespaceStatus";
-    pub const METHOD_CREATE_NAMESPACE: &str = "CreateNamespace";
     pub const METHOD_DELETE_NAMESPACE: &str = "DeleteNamespace";
     pub const METHOD_RELOAD_CONFIGURATION: &str = "ReloadConfiguration";
     pub const METHOD_VALIDATE_CONFIGURATION: &str = "ValidateConfiguration";
@@ -407,20 +406,6 @@ pub mod interface {
                     name: "status",
                     type_signature: "(sssasasas)",
                     description: "Namespace state information",
-                }],
-            },
-            MethodInfo {
-                name: METHOD_CREATE_NAMESPACE,
-                description: "Create a namespace from a configuration file",
-                input_args: vec![ArgInfo {
-                    name: "config_path",
-                    type_signature: "s",
-                    description: "Path to configuration file",
-                }],
-                output_args: vec![ArgInfo {
-                    name: "result",
-                    type_signature: "(bsa{ss})",
-                    description: "Operation result with success flag, message, and details",
                 }],
             },
             MethodInfo {
@@ -641,11 +626,6 @@ pub mod interface {
       <arg direction="out" name="status" type="(sssasasas)"/>
     </method>
     
-    <method name="CreateNamespace">
-      <arg direction="in" name="config_path" type="s"/>
-      <arg direction="out" name="result" type="(bsa{ss})"/>
-    </method>
-    
     <method name="DeleteNamespace">
       <arg direction="in" name="name" type="s"/>
       <arg direction="out" name="result" type="(bsa{ss})"/>
@@ -809,7 +789,6 @@ mod tests {
         let method_names: Vec<&str> = methods.iter().map(|m| m.name).collect();
         assert!(method_names.contains(&interface::METHOD_LIST_NAMESPACES));
         assert!(method_names.contains(&interface::METHOD_GET_NAMESPACE_STATUS));
-        assert!(method_names.contains(&interface::METHOD_CREATE_NAMESPACE));
         assert!(method_names.contains(&interface::METHOD_DELETE_NAMESPACE));
         assert!(method_names.contains(&interface::METHOD_RELOAD_CONFIGURATION));
         assert!(method_names.contains(&interface::METHOD_VALIDATE_CONFIGURATION));
@@ -882,16 +861,6 @@ mod tests {
         assert_eq!(status_method.input_args.len(), 1);
         assert_eq!(status_method.input_args[0].type_signature, "s");
         assert_eq!(status_method.output_args.len(), 1);
-
-        // Test CreateNamespace method
-        let create_method = methods
-            .iter()
-            .find(|m| m.name == interface::METHOD_CREATE_NAMESPACE)
-            .expect("CreateNamespace method should exist");
-        assert_eq!(create_method.input_args.len(), 1);
-        assert_eq!(create_method.input_args[0].type_signature, "s");
-        assert_eq!(create_method.output_args.len(), 1);
-        assert_eq!(create_method.output_args[0].type_signature, "(bsa{ss})");
     }
 
     #[test]
@@ -927,7 +896,6 @@ mod tests {
         assert!(xml.contains("org.segwire.NamespaceManager"));
         assert!(xml.contains("ListNamespaces"));
         assert!(xml.contains("GetNamespaceStatus"));
-        assert!(xml.contains("CreateNamespace"));
         assert!(xml.contains("NamespaceCreated"));
         assert!(xml.contains("OperationProgress"));
 
@@ -942,7 +910,7 @@ mod tests {
     #[test]
     fn test_method_enumeration() {
         let method_names = interface::get_method_names();
-        assert_eq!(method_names.len(), 8); // We should have 8 methods
+        assert_eq!(method_names.len(), 7); // We should have 7 methods
 
         let signal_names = interface::get_signal_names();
         assert_eq!(signal_names.len(), 6); // We should have 6 signals

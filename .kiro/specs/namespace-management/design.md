@@ -66,7 +66,7 @@ graph TB
 3. **Namespace Management**: Daemon creates/updates/deletes namespaces via netlink
 4. **CLI Communication**: CLI sends D-Bus method calls to daemon
 5. **Authorization**: PolicyKit validates user permissions for operations
-6. **Monitoring**: Daemon watches config files for changes using io_uring-based file monitoring
+6. **Monitoring**: Daemon watches config files for changes using inotify-based file monitoring
 
 ## Components and Interfaces
 
@@ -76,7 +76,7 @@ graph TB
 
 **Configuration Manager**
 - Responsible for reading and parsing TOML configuration files
-- Monitors configuration directory for changes using io_uring-based file watching
+- Monitors configuration directory for changes using inotify-based file watching
 - Validates configuration syntax and semantic correctness
 - Manages master configuration and namespace prefix resolution
 
@@ -96,7 +96,7 @@ graph TB
 - Uses monoio runtime with io_uring for high-performance async I/O operations
 - Coordinates between configuration monitoring, namespace management, and D-Bus service
 - Handles graceful shutdown and cleanup
-- Manages concurrent operations and error recovery with io_uring-based file monitoring
+- Manages concurrent operations and error recovery with inotify-based file monitoring and local-sync channels
 
 #### Key Dependencies (Rust Crates)
 
@@ -114,8 +114,14 @@ nix = "0.27"
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 
-# File system monitoring with io_uring
+# Async runtime
 monoio = { version = "0.2", features = ["sync", "macros"] }
+
+# File system monitoring (kernel inotify)
+inotify = { version = "0.10", default-features = false }
+
+# Thread-local async channels (monoio-compatible)
+local-sync = "0.1"
 
 # Logging
 tracing = "0.1"

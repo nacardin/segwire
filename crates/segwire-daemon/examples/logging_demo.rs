@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate D-Bus operation logging
     let dbus_ctx = LogContext::new("dbus_method_call")
-        .with_field("method", "CreateNamespace")
+        .with_field("method", "RestartNamespace")
         .with_field("sender", "segwire-cli")
         .with_user_id(1000);
 

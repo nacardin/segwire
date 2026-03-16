@@ -30,6 +30,9 @@ monoio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 
+# Timestamp formatting
+time = { version = "0.3", features = ["formatting", "macros"] }
+
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

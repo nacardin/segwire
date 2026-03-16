@@ -568,11 +568,10 @@ pub enum ConfigFileEvent {
     Deleted(PathBuf),
 }
 
-/// Configuration file monitor using monoio for io_uring-based file watching
+/// Configuration file monitor using inotify for kernel-based file watching
 pub struct ConfigFileMonitor {
     config_dir: PathBuf,
     debounce_duration: Duration,
-    _last_events: HashMap<PathBuf, Instant>,
 }
 
 impl ConfigFileMonitor {
@@ -581,131 +580,162 @@ impl ConfigFileMonitor {
         Self {
             config_dir,
             debounce_duration,
-            _last_events: HashMap::new(),
         }
     }
 
-    /// Start monitoring configuration files for changes
-    /// Returns a receiver for debounced file system events
+    /// Start monitoring configuration files for changes.
+    ///
+    /// Uses Linux inotify for event-driven file watching instead of polling.
+    /// Returns a `local-sync` receiver for debounced file system events.
     pub async fn start_monitoring(
         &mut self,
-    ) -> SegwireResult<std::sync::mpsc::Receiver<ConfigFileEvent>> {
+    ) -> SegwireResult<local_sync::mpsc::unbounded::Rx<ConfigFileEvent>> {
         info!(
-            "Starting configuration file monitoring for directory: {}",
+            "Starting inotify-based configuration file monitoring for directory: {}",
             self.config_dir.display()
         );
 
-        // Create a channel for file system events
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = local_sync::mpsc::unbounded::channel();
 
-        // Start the file system watcher task
         let config_dir = self.config_dir.clone();
         let debounce_duration = self.debounce_duration;
 
         monoio::spawn(async move {
-            if let Err(e) = Self::watch_directory(config_dir, debounce_duration, tx).await {
-                error!("File system monitoring failed: {}", e);
+            if let Err(e) = Self::watch_directory_inotify(config_dir, debounce_duration, tx).await {
+                error!("inotify-based file monitoring failed: {}", e);
             }
         });
 
         Ok(rx)
     }
 
-    /// Watch a directory for file system changes using polling with async sleep
-    async fn watch_directory(
+    /// Watch a directory for file system changes using inotify.
+    ///
+    /// Uses the Linux inotify API to receive kernel notifications for file
+    /// create/modify/delete events, replacing the old polling loop.
+    /// Debouncing is per-file-path to correctly handle rapid edits to
+    /// individual files.
+    async fn watch_directory_inotify(
         config_dir: PathBuf,
         debounce_duration: Duration,
-        tx: std::sync::mpsc::Sender<ConfigFileEvent>,
+        tx: local_sync::mpsc::unbounded::Tx<ConfigFileEvent>,
     ) -> SegwireResult<()> {
-        let mut known_files = HashMap::new();
-        let mut last_scan = Instant::now();
+        use inotify::{Inotify, WatchMask};
 
-        // Initial scan to establish baseline
-        if let Ok(entries) = std::fs::read_dir(&config_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                            if let Ok(modified) = metadata.modified() {
-                                known_files.insert(path, modified);
-                            }
-                        }
-                    }
-                }
+        let mut inotify = Inotify::init().map_err(|e| {
+            error!("Failed to initialize inotify: {}", e);
+            segwire_common::error::ConfigError::InvalidValue {
+                field: "inotify".to_string(),
+                value: format!("Failed to initialize inotify: {}", e),
             }
-        }
+        })?;
 
-        info!(
-            "Initial scan found {} configuration files",
-            known_files.len()
-        );
+        inotify
+            .watches()
+            .add(
+                &config_dir,
+                WatchMask::CREATE
+                    | WatchMask::MODIFY
+                    | WatchMask::DELETE
+                    | WatchMask::MOVED_FROM
+                    | WatchMask::MOVED_TO
+                    | WatchMask::CLOSE_WRITE,
+            )
+            .map_err(|e| {
+                error!(
+                    "Failed to add inotify watch for {}: {}",
+                    config_dir.display(),
+                    e
+                );
+                segwire_common::error::ConfigError::InvalidValue {
+                    field: "inotify_watch".to_string(),
+                    value: format!("Failed to watch directory: {}", e),
+                }
+            })?;
 
-        // Polling loop with async sleep
+        info!("inotify watch established for: {}", config_dir.display());
+
+        // Per-file debounce tracking
+        let mut last_events: HashMap<PathBuf, Instant> = HashMap::new();
+        let mut buffer = [0u8; 4096];
+
         loop {
-            sleep(Duration::from_millis(500)).await; // Poll every 500ms
+            // Read inotify events (non-blocking; Inotify::init uses IN_NONBLOCK
+            // is NOT the default, so we use a short async sleep to yield control
+            // instead of blocking the monoio runtime).
+            match inotify.read_events(&mut buffer) {
+                Ok(events) => {
+                    for event in events {
+                        // Only process events for .toml files
+                        let name = match event.name {
+                            Some(name) => name,
+                            None => continue,
+                        };
+                        let name_str = match name.to_str() {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        if !name_str.ends_with(".toml") {
+                            continue;
+                        }
 
-            let scan_start = Instant::now();
-            let mut current_files = HashMap::new();
-            let mut events = Vec::new();
+                        let path = config_dir.join(name);
 
-            // Scan directory for current state
-            if let Ok(entries) = std::fs::read_dir(&config_dir) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        if metadata.is_file() {
-                            let path = entry.path();
-                            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                                if let Ok(modified) = metadata.modified() {
-                                    current_files.insert(path.clone(), modified);
+                        // Per-file-path debounce: skip if we emitted an event
+                        // for this path within the debounce window.
+                        let now = Instant::now();
+                        if let Some(last) = last_events.get(&path) {
+                            if now.duration_since(*last) < debounce_duration {
+                                debug!("Debouncing event for: {}", path.display());
+                                continue;
+                            }
+                        }
+                        last_events.insert(path.clone(), now);
 
-                                    // Check for new or modified files
-                                    match known_files.get(&path) {
-                                        None => {
-                                            // New file
-                                            events.push(ConfigFileEvent::Created(path));
-                                        }
-                                        Some(old_modified) if *old_modified != modified => {
-                                            // Modified file
-                                            events.push(ConfigFileEvent::Modified(path));
-                                        }
-                                        _ => {
-                                            // Unchanged file
-                                        }
-                                    }
-                                }
+                        let mask = event.mask;
+                        let file_event = if mask.contains(inotify::EventMask::CREATE)
+                            || mask.contains(inotify::EventMask::MOVED_TO)
+                        {
+                            Some(ConfigFileEvent::Created(path))
+                        } else if mask.contains(inotify::EventMask::MODIFY)
+                            || mask.contains(inotify::EventMask::CLOSE_WRITE)
+                        {
+                            Some(ConfigFileEvent::Modified(path))
+                        } else if mask.contains(inotify::EventMask::DELETE)
+                            || mask.contains(inotify::EventMask::MOVED_FROM)
+                        {
+                            Some(ConfigFileEvent::Deleted(path))
+                        } else {
+                            None
+                        };
+
+                        if let Some(evt) = file_event {
+                            debug!("Sending inotify file event: {:?}", evt);
+                            if tx.send(evt).is_err() {
+                                warn!("Failed to send file event — receiver dropped");
+                                return Ok(());
                             }
                         }
                     }
                 }
-            }
-
-            // Check for deleted files
-            for path in known_files.keys() {
-                if !current_files.contains_key(path) {
-                    events.push(ConfigFileEvent::Deleted(path.clone()));
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No events available yet — this is normal for non-blocking reads
+                }
+                Err(e) => {
+                    error!("inotify read error: {}", e);
+                    // Brief backoff before retrying
+                    sleep(Duration::from_secs(1)).await;
                 }
             }
 
-            // Update known files
-            known_files = current_files;
+            // Yield to the monoio runtime before polling again.
+            // This is much lighter than the old 500ms full-directory scan.
+            sleep(Duration::from_millis(100)).await;
 
-            // Send debounced events
+            // Periodically prune stale debounce entries (older than 10× debounce window)
+            let prune_cutoff = debounce_duration * 10;
             let now = Instant::now();
-            for event in events {
-                // Simple debouncing: only send event if enough time has passed since last scan
-                let should_send = now.duration_since(last_scan) >= debounce_duration;
-
-                if should_send {
-                    debug!("Sending file system event: {:?}", event);
-                    if tx.send(event).is_err() {
-                        warn!("Failed to send file system event - receiver dropped");
-                        break;
-                    }
-                }
-            }
-
-            last_scan = scan_start;
+            last_events.retain(|_, last| now.duration_since(*last) < prune_cutoff);
         }
     }
 }
@@ -714,7 +744,7 @@ impl ConfigManager {
     /// Start monitoring configuration files for changes
     pub async fn start_file_monitoring(
         &mut self,
-    ) -> SegwireResult<std::sync::mpsc::Receiver<ConfigFileEvent>> {
+    ) -> SegwireResult<local_sync::mpsc::unbounded::Rx<ConfigFileEvent>> {
         let mut monitor = ConfigFileMonitor::new(
             self.config_directory().to_path_buf(),
             Duration::from_millis(1000), // 1 second debounce
@@ -1012,12 +1042,10 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let daemon_config_path = create_test_daemon_config(&temp_dir, "test");
 
-        // Create some test namespace configurations
         create_test_namespace_config(&temp_dir, "app1");
         create_test_namespace_config(&temp_dir, "app2");
-        create_test_namespace_config(&temp_dir, "other-app"); // This should be skipped due to prefix
+        create_test_namespace_config(&temp_dir, "other-app");
 
-        // Create a non-TOML file that should be ignored
         let non_toml_path = temp_dir.path().join("namespaces").join("readme.txt");
         fs::write(&non_toml_path, "This is not a TOML file")
             .expect("Failed to write non-TOML file");
@@ -1025,18 +1053,15 @@ mod tests {
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
 
-        // Scan for namespace configurations
         let loaded_configs = config_manager
             .scan_namespace_configs()
             .expect("Failed to scan configs");
 
-        // Should load app1 and app2, but not other-app (wrong prefix) or readme.txt (not TOML)
         assert_eq!(loaded_configs.len(), 2);
         assert!(loaded_configs.contains(&"test-app1".to_string()));
         assert!(loaded_configs.contains(&"test-app2".to_string()));
         assert!(!loaded_configs.contains(&"test-other-app".to_string()));
 
-        // Check that configurations are stored
         assert_eq!(config_manager.namespace_configs().len(), 2);
         assert!(config_manager.get_namespace_config("test-app1").is_some());
         assert!(config_manager.get_namespace_config("test-app2").is_some());
@@ -1050,10 +1075,9 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let daemon_config_path = create_test_daemon_config(&temp_dir, "segwire");
 
-        // Create namespace configs with different names
-        create_test_namespace_config(&temp_dir, "app"); // Should become segwire-app
-        create_test_namespace_config(&temp_dir, "segwire-service"); // Already has prefix
-        create_test_namespace_config(&temp_dir, "other-service"); // Wrong prefix (starts with "other-")
+        create_test_namespace_config(&temp_dir, "app");
+        create_test_namespace_config(&temp_dir, "segwire-service");
+        create_test_namespace_config(&temp_dir, "other-service");
 
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
@@ -1062,7 +1086,6 @@ mod tests {
             .scan_namespace_configs()
             .expect("Failed to scan configs");
 
-        // Should load app (as segwire-app) and segwire-service, but not other-service
         assert_eq!(loaded_configs.len(), 2);
         assert!(loaded_configs.contains(&"segwire-app".to_string()));
         assert!(loaded_configs.contains(&"segwire-service".to_string()));
@@ -1079,16 +1102,13 @@ mod tests {
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
 
-        // Initial load
         let result = config_manager
             .reload_namespace_config(&namespace_config_path)
             .expect("Failed to reload config");
         assert_eq!(result, Some("test-app".to_string()));
 
-        // Verify it's loaded
         assert!(config_manager.get_namespace_config("test-app").is_some());
 
-        // Update the configuration file
         let updated_config_content = r#"
     [namespace]
     name = "app"
@@ -1110,13 +1130,11 @@ mod tests {
         fs::write(&namespace_config_path, updated_config_content)
             .expect("Failed to write updated config");
 
-        // Reload the configuration
         let result = config_manager
             .reload_namespace_config(&namespace_config_path)
             .expect("Failed to reload updated config");
         assert_eq!(result, Some("test-app".to_string()));
 
-        // Verify the configuration was updated
         let config_entry = config_manager.get_namespace_config("test-app").unwrap();
         assert_eq!(
             config_entry.config.namespace.description,
@@ -1143,17 +1161,14 @@ mod tests {
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
 
-        // Load the configuration
         config_manager
             .reload_namespace_config(&namespace_config_path)
             .expect("Failed to load config");
         assert!(config_manager.get_namespace_config("test-app").is_some());
 
-        // Remove the configuration
         let removed_name = config_manager.remove_namespace_config(&namespace_config_path);
         assert_eq!(removed_name, Some("test-app".to_string()));
 
-        // Verify it's removed
         assert!(config_manager.get_namespace_config("test-app").is_none());
         assert_eq!(config_manager.namespace_configs().len(), 0);
     }
@@ -1185,7 +1200,6 @@ mod tests {
         let mut config_manager =
             ConfigManager::new(daemon_config_path).expect("Failed to create config manager");
 
-        // Test file creation event
         let new_config_path = create_test_namespace_config(&temp_dir, "newapp");
         let event = ConfigFileEvent::Created(new_config_path.clone());
         let result = config_manager
@@ -1197,7 +1211,6 @@ mod tests {
         assert_eq!(result[0], "test-newapp");
         assert!(config_manager.get_namespace_config("test-newapp").is_some());
 
-        // Test file modification event
         let updated_config_content = r#"
     [namespace]
     name = "newapp"
@@ -1228,7 +1241,6 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "test-newapp");
 
-        // Verify the configuration was updated
         let config_entry = config_manager.get_namespace_config("test-newapp").unwrap();
         assert_eq!(
             config_entry.config.namespace.description,
@@ -1236,7 +1248,6 @@ mod tests {
         );
         assert_eq!(config_entry.config.interfaces.move_interfaces, vec!["eth1"]);
 
-        // Test file deletion event
         let event = ConfigFileEvent::Deleted(new_config_path);
         let result = config_manager
             .handle_file_event(event)

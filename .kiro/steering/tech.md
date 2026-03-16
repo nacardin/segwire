@@ -26,6 +26,8 @@
 - `nix` - Unix system calls
 - `toml` - Configuration file parsing
 - `tracing` - Structured logging
+- `inotify` - Kernel-based file system event monitoring for configuration changes
+- `local-sync` - Thread-local async channels (monoio-compatible replacement for `std::sync::mpsc`)
 
 ### CLI-Specific
 - Output formatting and D-Bus client functionality

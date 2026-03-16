@@ -180,11 +180,11 @@ impl DaemonEventLoop {
 
     /// Spawn configuration monitoring task
     ///
-    /// This task monitors configuration file changes using io_uring-based file watching
+    /// This task monitors configuration file changes using inotify-based file watching
     /// and handles configuration updates by coordinating with the D-Bus service.
     fn spawn_config_monitoring_task(
         &self,
-        config_event_receiver: std::sync::mpsc::Receiver<ConfigFileEvent>,
+        mut config_event_receiver: local_sync::mpsc::unbounded::Rx<ConfigFileEvent>,
     ) -> monoio::task::JoinHandle<()> {
         let config_manager = self.config_manager.clone();
         let state_manager = self.state_manager.clone();
@@ -201,81 +201,83 @@ impl DaemonEventLoop {
                     break;
                 }
 
-                // Check for configuration file events (non-blocking)
-                match config_event_receiver.try_recv() {
-                    Ok(event) => {
-                        debug!("Processing configuration file event: {:?}", event);
+                // Await the next configuration file event (non-busy-waiting)
+                let event = match config_event_receiver.recv().await {
+                    Some(event) => event,
+                    None => {
+                        warn!("Configuration file monitoring channel closed");
+                        break;
+                    }
+                };
 
-                        // Handle the configuration file event
-                        let affected_namespaces = {
-                            let mut manager = config_manager.lock().await;
-                            match manager.handle_file_event(event).await {
-                                Ok(namespaces) => namespaces,
-                                Err(e) => {
-                                    error!("Failed to handle configuration file event: {}", e);
-                                    continue;
+                debug!("Processing configuration file event: {:?}", event);
+
+                // Handle the configuration file event
+                let affected_namespaces = {
+                    let mut manager = config_manager.lock().await;
+                    match manager.handle_file_event(event).await {
+                        Ok(namespaces) => namespaces,
+                        Err(e) => {
+                            error!("Failed to handle configuration file event: {}", e);
+                            continue;
+                        }
+                    }
+                };
+
+                // Trigger immediate state synchronization for affected namespaces
+                if !affected_namespaces.is_empty() {
+                    debug!("Configuration change detected, triggering state synchronization");
+
+                    let config_mgr = config_manager.lock().await;
+                    let mut state_mgr = state_manager.lock().await;
+
+                    match state_mgr.force_sync(&config_mgr).await {
+                        Ok(result) => {
+                            // Emit D-Bus signals for state changes
+                            for namespace in &result.created {
+                                if let Err(e) = dbus_service
+                                    .emit_namespace_created(namespace, "config_change")
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to emit namespace created signal for {}: {}",
+                                        namespace, e
+                                    );
                                 }
                             }
-                        };
 
-                        // Trigger immediate state synchronization for affected namespaces
-                        if !affected_namespaces.is_empty() {
-                            debug!(
-                                "Configuration change detected, triggering state synchronization"
-                            );
-
-                            let config_mgr = config_manager.lock().await;
-                            let mut state_mgr = state_manager.lock().await;
-
-                            match state_mgr.force_sync(&config_mgr).await {
-                                Ok(result) => {
-                                    // Emit D-Bus signals for state changes
-                                    for namespace in &result.created {
-                                        if let Err(e) = dbus_service
-                                            .emit_namespace_created(namespace, "config_change")
-                                            .await
-                                        {
-                                            warn!("Failed to emit namespace created signal for {}: {}", namespace, e);
-                                        }
-                                    }
-
-                                    for namespace in &result.deleted {
-                                        if let Err(e) = dbus_service
-                                            .emit_namespace_deleted(namespace, "config_change")
-                                            .await
-                                        {
-                                            warn!("Failed to emit namespace deleted signal for {}: {}", namespace, e);
-                                        }
-                                    }
-
-                                    for namespace in &result.updated {
-                                        if let Err(e) = dbus_service
-                                            .emit_namespace_status_changed(
-                                                namespace, "unknown", "updated",
-                                            )
-                                            .await
-                                        {
-                                            warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
-                                        }
-                                    }
+                            for namespace in &result.deleted {
+                                if let Err(e) = dbus_service
+                                    .emit_namespace_deleted(namespace, "config_change")
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to emit namespace deleted signal for {}: {}",
+                                        namespace, e
+                                    );
                                 }
-                                Err(e) => {
-                                    error!("Failed to synchronize state after configuration change: {}", e);
+                            }
+
+                            for namespace in &result.updated {
+                                if let Err(e) = dbus_service
+                                    .emit_namespace_status_changed(namespace, "unknown", "updated")
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to emit namespace status changed signal for {}: {}",
+                                        namespace, e
+                                    );
                                 }
                             }
                         }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        // No events available, continue
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        warn!("Configuration file monitoring channel disconnected");
-                        break;
+                        Err(e) => {
+                            error!(
+                                "Failed to synchronize state after configuration change: {}",
+                                e
+                            );
+                        }
                     }
                 }
-
-                // Sleep briefly to avoid busy waiting
-                monoio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
 
             info!("Configuration monitoring task completed");
@@ -360,7 +362,7 @@ impl DaemonEventLoop {
                 }
             }
 
-            let mut maintenance_counter = 0;
+            let _maintenance_counter = 0;
 
             loop {
                 // Check for shutdown signal
@@ -421,37 +423,27 @@ impl DaemonEventLoop {
                                         )
                                         .await
                                     {
-                                        warn!("Failed to emit namespace status changed signal for {}: {}", namespace, e);
+                                        warn!(
+                                            "Failed to emit namespace status changed signal for {}: {}",
+                                            namespace, e
+                                        );
                                     }
                                 }
 
-                                // Auto-resolve Create/Delete conflicts
                                 for conflict in &result.conflicts {
-                                    match conflict.resolution {
-                                        crate::namespace_state::ConflictResolution::CreateNamespace |
-                                        crate::namespace_state::ConflictResolution::DeleteNamespace => {
-                                            if let Err(e) = state_mgr.resolve_conflict(conflict, &config_mgr).await {
-                                                warn!("Failed to auto-resolve conflict for {}: {}", conflict.namespace_name, e);
-                                            } else {
-                                                info!("Auto-resolved conflict for {}", conflict.namespace_name);
-                                            }
-                                        }
-                                    }
+                                    warn!(
+                                        "State synchronization conflict for {}: {:?}",
+                                        conflict.namespace_name, conflict.resolution
+                                    );
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("State synchronization failed: {}", e);
+                            error!("Failed to synchronize namespace states: {}", e);
                         }
                     }
-                }
 
-                // Perform maintenance every 10 sync cycles (approximately every 5 minutes)
-                maintenance_counter += 1;
-                if maintenance_counter >= 10 {
-                    maintenance_counter = 0;
-
-                    let mut state_mgr = state_manager.lock().await;
+                    // Perform periodic maintenance
                     if let Err(e) = state_mgr.perform_maintenance().await {
                         warn!("State maintenance failed: {}", e);
                     }

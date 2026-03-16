@@ -297,66 +297,6 @@ impl NamespaceManagerInterface {
         }
     }
 
-    /// Create a namespace from a configuration file
-    async fn create_namespace(
-        &self,
-        #[zbus(header)] header: zbus::MessageHeader<'_>,
-        config_path: String,
-    ) -> zbus::fdo::Result<method_signatures::StandardOperationResult> {
-        debug!("D-Bus method call: CreateNamespace({})", config_path);
-
-        // Validate input
-        if let Err(e) = interface_helpers::validate_config_path(&config_path) {
-            warn!("Invalid config path '{}': {}", config_path, e.message());
-            return Err(create_fdo_error(SegwireError::from(e)));
-        }
-
-        // Check authorization
-        if let Err(e) = self.check_authorization("create", &header).await {
-            warn!("Authorization failed for CreateNamespace: {:?}", e);
-            return Err(create_fdo_error(e));
-        }
-
-        // Load and parse the configuration file
-        let config_path_buf = std::path::PathBuf::from(&config_path);
-        let namespace_config = match self.load_namespace_config(&config_path_buf).await {
-            Ok(config) => config,
-            Err(e) => {
-                warn!(
-                    "Failed to load namespace config from '{}': {:?}",
-                    config_path, e
-                );
-                self.emit_error("ConfigurationError", &e.to_string(), "")
-                    .await;
-                return Ok(OperationResult::failure(format!(
-                    "Failed to load configuration: {}",
-                    e
-                )));
-            }
-        };
-
-        // Create the namespace
-        match self.create_namespace_from_config(namespace_config).await {
-            Ok(namespace_name) => {
-                info!("Successfully created namespace '{}'", namespace_name);
-                Ok(OperationResult::success(format!(
-                    "Namespace '{}' created successfully",
-                    namespace_name
-                ))
-                .with_detail("namespace".to_string(), namespace_name))
-            }
-            Err(e) => {
-                warn!("Failed to create namespace from '{}': {:?}", config_path, e);
-                self.emit_error("CreationError", &e.to_string(), &config_path)
-                    .await;
-                Ok(OperationResult::failure(format!(
-                    "Failed to create namespace: {}",
-                    e
-                )))
-            }
-        }
-    }
-
     /// Delete a managed namespace
     async fn delete_namespace(
         &self,
