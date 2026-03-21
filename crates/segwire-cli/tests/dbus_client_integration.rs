@@ -2,7 +2,7 @@ use anyhow::Result;
 use segwire_cli::dbus_client::DbusClient;
 use segwire_common::dbus::{
     method_signatures::{DaemonStatusResult, ListNamespacesResult},
-    NamespaceState, OperationResult,
+    NamespaceState, NamespaceStatus, OperationResult,
 };
 use zbus::Connection;
 
@@ -31,7 +31,7 @@ impl MockDaemon {
             Ok(NamespaceState {
                 name: "test-ns".to_string(),
                 full_name: "segwire-test-ns".to_string(),
-                status: "active".to_string(),
+                status: NamespaceStatus::Active,
                 config_path: "/path/to/test-ns.toml".to_string(),
                 interfaces: vec![],
                 routes: vec![],

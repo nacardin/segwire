@@ -70,7 +70,7 @@ async fn show_namespace_status(
     let data = NamespaceStatusData {
         name: state.name,
         full_name: state.full_name,
-        status: state.status,
+        status: state.status.to_string(),
         config_path: state.config_path,
         interfaces: state
             .interfaces

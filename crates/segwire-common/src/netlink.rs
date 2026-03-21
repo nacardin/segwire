@@ -127,6 +127,41 @@ pub struct DnsConfig {
     pub options: Vec<String>,
 }
 
+impl RouteConfig {
+    pub fn validate(&self) -> SegwireResult<()> {
+        if self.destination.is_empty() {
+            return Err(
+                NetlinkError::InvalidRoute("destination cannot be empty".to_string()).into(),
+            );
+        }
+        if self.destination != "default" {
+            crate::utils::validate_cidr(&self.destination)?;
+        }
+        crate::utils::validate_ip_address(&self.gateway)?;
+        if let Some(iface) = &self.interface {
+            crate::utils::validate_interface_name(iface)?;
+        }
+        Ok(())
+    }
+}
+
+impl DnsConfig {
+    pub fn validate(&self) -> SegwireResult<()> {
+        if self.servers.is_empty() {
+            return Err(
+                NetlinkError::InvalidDns("at least one DNS server required".to_string()).into(),
+            );
+        }
+        for server in &self.servers {
+            crate::utils::validate_ip_address(server)?;
+        }
+        for domain in &self.search_domains {
+            crate::utils::validate_domain_name(domain)?;
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Raw netlink helpers
 // ---------------------------------------------------------------------------
@@ -353,7 +388,7 @@ impl NetlinkManager {
     ///
     /// In simulation mode, adds an entry to the in-memory map.
     pub fn create_namespace(&self, name: &str) -> SegwireResult<NamespaceInfo> {
-        self.validate_namespace_name(name)?;
+        crate::utils::validate_namespace_name(name)?;
 
         if let NetlinkBackend::Simulated(state) = &self.backend {
             let mut state = state.borrow_mut();
@@ -440,7 +475,7 @@ impl NetlinkManager {
     /// Mirrors `ip netns delete`: unmount the bind-mount, remove the file.
     /// In simulation mode, removes from the in-memory map.
     pub fn delete_namespace(&self, name: &str) -> SegwireResult<()> {
-        self.validate_namespace_name(name)?;
+        crate::utils::validate_namespace_name(name)?;
 
         if let NetlinkBackend::Simulated(state) = &self.backend {
             let mut state = state.borrow_mut();
@@ -611,7 +646,7 @@ impl NetlinkManager {
         if self.is_simulated() {
             return Ok(vec!["lo".to_string()]);
         }
-        self.validate_namespace_name(namespace_name)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
         }
@@ -660,8 +695,8 @@ impl NetlinkManager {
             );
             return Ok(());
         }
-        self.validate_namespace_name(namespace_name)?;
-        self.validate_interface_name(interface_name)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
+        crate::utils::validate_interface_name(interface_name)?;
 
         if !self.interface_exists(interface_name)? {
             return Err(NetlinkError::InterfaceNotFound(interface_name.to_string()).into());
@@ -735,8 +770,8 @@ impl NetlinkManager {
             );
             return Ok(());
         }
-        self.validate_namespace_name(namespace_name)?;
-        self.validate_interface_name(interface_name)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
+        crate::utils::validate_interface_name(interface_name)?;
 
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
@@ -803,8 +838,8 @@ impl NetlinkManager {
             info!("[SIM] Created veth pair '{}'<->'{}'", veth_name, peer_name);
             return Ok(());
         }
-        self.validate_interface_name(veth_name)?;
-        self.validate_interface_name(peer_name)?;
+        crate::utils::validate_interface_name(veth_name)?;
+        crate::utils::validate_interface_name(peer_name)?;
 
         if self.interface_exists(veth_name)? {
             return Err(NetlinkError::VirtualInterfaceCreateFailed(
@@ -860,7 +895,7 @@ impl NetlinkManager {
             info!("[SIM] Configured routes for namespace '{}'", namespace_name);
             return Ok(());
         }
-        self.validate_namespace_name(namespace_name)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
 
         for route in routes {
             self.add_route_to_namespace(namespace_name, route)?;
@@ -877,7 +912,7 @@ impl NetlinkManager {
         if self.is_simulated() {
             return Ok(());
         }
-        self.validate_route_config(route)?;
+        route.validate()?;
 
         let ns_name = namespace_name.to_string();
         let route_clone = route.clone();
@@ -955,7 +990,7 @@ impl NetlinkManager {
         if self.is_simulated() {
             return Ok(Vec::new());
         }
-        self.validate_namespace_name(namespace_name)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
         }
@@ -1004,8 +1039,8 @@ impl NetlinkManager {
             info!("[SIM] Configured DNS for namespace '{}'", namespace_name);
             return Ok(());
         }
-        self.validate_namespace_name(namespace_name)?;
-        self.validate_dns_config(dns_config)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
+        dns_config.validate()?;
 
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
@@ -1064,7 +1099,7 @@ impl NetlinkManager {
                 options: Vec::new(),
             });
         }
-        self.validate_namespace_name(namespace_name)?;
+        crate::utils::validate_namespace_name(namespace_name)?;
         if !self.namespace_exists(namespace_name)? {
             return Err(NetlinkError::NamespaceNotFound(namespace_name.to_string()).into());
         }
@@ -1095,7 +1130,7 @@ impl NetlinkManager {
 
     /// Get information about a specific namespace.
     pub fn get_namespace_info(&self, name: &str) -> SegwireResult<NamespaceInfo> {
-        self.validate_namespace_name(name)?;
+        crate::utils::validate_namespace_name(name)?;
 
         if let NetlinkBackend::Simulated(state) = &self.backend {
             let state = state.borrow();
@@ -1194,49 +1229,6 @@ impl NetlinkManager {
     // -----------------------------------------------------------------------
     // Validation helpers
     // -----------------------------------------------------------------------
-
-    fn validate_namespace_name(&self, name: &str) -> SegwireResult<()> {
-        crate::utils::validate_namespace_name(name)
-    }
-
-    fn validate_interface_name(&self, name: &str) -> SegwireResult<()> {
-        if name.is_empty() {
-            return Err(NetlinkError::InterfaceNotFound("empty name".to_string()).into());
-        }
-        if name.len() > 15 {
-            return Err(NetlinkError::InterfaceNotFound(format!(
-                "interface name '{}' exceeds IFNAMSIZ (15 chars)",
-                name
-            ))
-            .into());
-        }
-        Ok(())
-    }
-
-    fn validate_route_config(&self, route: &RouteConfig) -> SegwireResult<()> {
-        if route.destination.is_empty() {
-            return Err(
-                NetlinkError::InvalidRoute("destination cannot be empty".to_string()).into(),
-            );
-        }
-        Ok(())
-    }
-
-    fn validate_dns_config(&self, dns: &DnsConfig) -> SegwireResult<()> {
-        if dns.servers.is_empty() {
-            return Err(
-                NetlinkError::InvalidDns("at least one DNS server required".to_string()).into(),
-            );
-        }
-        for server in &dns.servers {
-            if server.parse::<std::net::IpAddr>().is_err() {
-                return Err(
-                    NetlinkError::InvalidDns(format!("invalid DNS server IP: {}", server)).into(),
-                );
-            }
-        }
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,8 @@ pub const DBUS_OBJECT_PATH: &str = "/org/segwire/NamespaceManager";
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct NamespaceState {
     pub name: String,
-    pub full_name: String, // prefixed name
-    pub status: String,    // Status as string for D-Bus compatibility
+    pub full_name: String,       // prefixed name
+    pub status: NamespaceStatus, // Status as enum, serialized as string for D-Bus
     pub config_path: String,
     pub interfaces: Vec<InterfaceInfo>,
     pub routes: Vec<RouteInfo>,
@@ -34,12 +34,19 @@ pub struct NamespaceState {
 }
 
 /// Namespace status enumeration
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NamespaceStatus {
     Creating,
     Active,
     Failed,
     Deleting,
+}
+
+impl zvariant::Type for NamespaceStatus {
+    fn signature() -> zvariant::Signature<'static> {
+        zvariant::Signature::from_static_str_unchecked("s")
+    }
 }
 
 /// Network interface information
@@ -103,7 +110,7 @@ impl NamespaceState {
         Self {
             name,
             full_name,
-            status: "creating".to_string(),
+            status: NamespaceStatus::Creating,
             config_path: config_path.display().to_string(),
             interfaces: Vec::new(),
             routes: Vec::new(),
@@ -126,23 +133,17 @@ impl NamespaceState {
 
     /// Check if the namespace is in an active state
     pub fn is_active(&self) -> bool {
-        self.parsed_status() == NamespaceStatus::Active
+        self.status == NamespaceStatus::Active
     }
 
     /// Check if the namespace is in a failed state
     pub fn is_failed(&self) -> bool {
-        self.parsed_status() == NamespaceStatus::Failed
-    }
-
-    /// Parse the status string into a NamespaceStatus enum.
-    /// Returns `Failed` for unrecognised strings (including "failed: ...").
-    pub fn parsed_status(&self) -> NamespaceStatus {
-        self.status.parse().unwrap_or(NamespaceStatus::Failed)
+        self.status == NamespaceStatus::Failed
     }
 
     /// Set the status with a NamespaceStatus enum
     pub fn set_status(&mut self, status: NamespaceStatus) {
-        self.status = status.to_string();
+        self.status = status;
         self.touch();
     }
 }
@@ -703,7 +704,14 @@ pub mod interface_helpers {
     ) -> Vec<(String, String, String, String)> {
         namespaces
             .into_iter()
-            .map(|ns| (ns.name, ns.status, ns.config_path, "".to_string())) // description placeholder
+            .map(|ns| {
+                (
+                    ns.name,
+                    ns.status.to_string(),
+                    ns.config_path,
+                    "".to_string(),
+                )
+            }) // description placeholder
             .collect()
     }
 
@@ -937,16 +945,15 @@ mod tests {
     #[test]
     fn test_namespace_state_creation() {
         let state = NamespaceState::new(
-            "test-ns".to_string(),
-            "segwire-test-ns".to_string(),
-            PathBuf::from("/etc/segwire/test.toml"),
+            "test".to_string(),
+            "prefix-test".to_string(),
+            PathBuf::from("/etc/test.toml"),
         );
 
-        assert_eq!(state.name, "test-ns");
-        assert_eq!(state.full_name, "segwire-test-ns");
-        assert_eq!(state.status, "creating");
-        assert_eq!(state.parsed_status(), NamespaceStatus::Creating);
-        assert_eq!(state.config_path, "/etc/segwire/test.toml");
+        assert_eq!(state.name, "test");
+        assert_eq!(state.full_name, "prefix-test");
+        assert_eq!(state.status, NamespaceStatus::Creating);
+        assert_eq!(state.config_path, "/etc/test.toml");
         assert!(state.interfaces.is_empty());
         assert!(state.routes.is_empty());
         assert!(state.dns_config.servers.is_empty());

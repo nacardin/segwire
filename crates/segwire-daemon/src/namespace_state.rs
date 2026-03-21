@@ -418,7 +418,7 @@ impl NamespaceStateManager {
                 // Update state with failure
                 if let Some(state) = self.get_namespace_state_mut(full_name) {
                     state.set_status(NamespaceStatus::Failed);
-                    state.status = format!("failed: {}", e);
+                    state.status = NamespaceStatus::Failed;
                 }
 
                 Err(e)
@@ -581,7 +581,7 @@ impl NamespaceStateManager {
 
         // Set status based on actual info
         if actual_info.active {
-            state.status = NamespaceStatus::Active.to_string();
+            state.status = NamespaceStatus::Active;
         }
 
         state.touch();
@@ -658,7 +658,7 @@ impl NamespaceStateManager {
         };
 
         for state in self.namespace_states.values() {
-            match state.parsed_status() {
+            match state.status {
                 NamespaceStatus::Active => stats.active_namespaces += 1,
                 NamespaceStatus::Creating => stats.creating_namespaces += 1,
                 NamespaceStatus::Deleting => stats.deleting_namespaces += 1,

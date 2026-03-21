@@ -240,7 +240,7 @@ impl NamespaceManagerInterface {
             .map(|ns| {
                 (
                     ns.name.clone(),
-                    ns.status.clone(),
+                    ns.status.to_string(),
                     ns.config_path.clone(),
                     format!("Namespace managed by {}", prefix),
                 )
@@ -856,7 +856,20 @@ impl NamespaceManagerInterface {
                 );
 
                 // Perform semantic validation
-                self.validate_config_semantics(&config, &mut errors, &mut warnings);
+                if let Err(e) = config.validate() {
+                    errors.push(e.to_string());
+                }
+
+                // Advisory warnings (valid config, but potentially incomplete)
+                if config.interfaces.move_interfaces.is_empty()
+                    && config.interfaces.virtual_interfaces.is_empty()
+                {
+                    warnings.push("No interfaces specified for namespace".to_string());
+                }
+
+                if config.dns.servers.is_empty() {
+                    warnings.push("No DNS servers specified".to_string());
+                }
 
                 let is_valid = errors.is_empty();
                 debug!(
@@ -880,33 +893,6 @@ impl NamespaceManagerInterface {
                     warnings,
                 })
             }
-        }
-    }
-
-    /// Validate configuration semantics and add errors/warnings.
-    ///
-    /// Delegates to `NamespaceConfig::validate()` for error detection, then
-    /// adds advisory warnings that don't constitute hard errors.
-    fn validate_config_semantics(
-        &self,
-        config: &segwire_common::NamespaceConfig,
-        errors: &mut Vec<String>,
-        warnings: &mut Vec<String>,
-    ) {
-        // Delegate to the canonical validation in segwire-common
-        if let Err(e) = config.validate() {
-            errors.push(format!("{}", e));
-        }
-
-        // Advisory warnings (valid config, but potentially incomplete)
-        if config.interfaces.move_interfaces.is_empty()
-            && config.interfaces.virtual_interfaces.is_empty()
-        {
-            warnings.push("No interfaces specified for namespace".to_string());
-        }
-
-        if config.dns.servers.is_empty() {
-            warnings.push("No DNS servers specified".to_string());
         }
     }
 
