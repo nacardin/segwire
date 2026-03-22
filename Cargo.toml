@@ -1,10 +1,5 @@
 [workspace]
-members = [
-    "crates/segwire-daemon",
-    "crates/segwire-cli",
-    "crates/segwire-common",
-    "crates/segwire-test",
-]
+members = ["crates/segwire-daemon", "crates/segwire-cli", "crates/segwire-common", "crates/segwire-test"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -38,13 +33,7 @@ netlink-packet-route = "0.17"
 netlink-packet-core = "0.7"
 netlink-packet-utils = "0.5"
 netlink-sys = "0.8"
-nix = { version = "0.27", features = [
-    "user",
-    "process",
-    "sched",
-    "mount",
-    "fs",
-] }
+nix = { version = "0.27", features = ["user", "process", "sched", "mount", "fs"] }
 
 # Logging
 tracing = "0.1"
@@ -52,3 +41,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Internal crates
 segwire-common = { path = "crates/segwire-common" }
+
+# File system monitoring
+inotify-tpc = { path = "../tpc-libs/crates/inotify-tpc", features = ["monoio-rt"] }
