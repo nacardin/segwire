@@ -12,6 +12,8 @@ pub mod netlink;
 pub mod security;
 pub mod utils;
 
+mod netlink_raw;
+
 #[cfg(test)]
 mod logging_test;
 
