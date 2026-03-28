@@ -5,10 +5,10 @@
 //! and conflict resolution for configuration changes.
 
 use crate::config::{ConfigManager, NamespaceConfigEntry};
+use crate::netlink::NetlinkManager;
 use segwire_common::{
     dbus::{NamespaceState, NamespaceStatus},
     error::{SegwireError, SegwireResult},
-    netlink::NetlinkManager,
 };
 use std::collections::HashMap;
 

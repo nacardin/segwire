@@ -642,7 +642,7 @@ impl NamespaceManagerInterface {
         &self,
         config: segwire_common::NamespaceConfig,
     ) -> Result<String, SegwireError> {
-        use segwire_common::netlink::NetlinkManager;
+        use crate::netlink::NetlinkManager;
 
         let full_name = {
             let config_mgr = self.config_manager.lock().await;
@@ -683,7 +683,7 @@ impl NamespaceManagerInterface {
 
     /// Delete a namespace by name
     async fn delete_namespace_by_name(&self, name: &str) -> Result<(), SegwireError> {
-        use segwire_common::netlink::NetlinkManager;
+        use crate::netlink::NetlinkManager;
 
         let full_name = {
             let config_mgr = self.config_manager.lock().await;

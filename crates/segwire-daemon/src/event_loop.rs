@@ -538,7 +538,7 @@ impl DaemonEventLoop {
                 }
 
                 // Actual namespace cleanup using netlink
-                if let Ok(netlink) = segwire_common::netlink::NetlinkManager::new() {
+                if let Ok(netlink) = crate::netlink::NetlinkManager::new() {
                     let config_mgr = self.config_manager.lock().await;
                     if let Some(config_entry) = config_mgr.get_namespace_config(&namespace_name) {
                         // 1. Moving interfaces back to default namespace

@@ -14,6 +14,9 @@ zvariant = { workspace = true }
 
 # Network namespace management
 nix = { workspace = true }
+netlink-tpc = { workspace = true }
+netlink-packet-route = { workspace = true }
+netlink-packet-core = { workspace = true }
 
 # Configuration parsing
 toml = { workspace = true }

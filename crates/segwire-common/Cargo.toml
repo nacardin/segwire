@@ -20,11 +20,7 @@ thiserror = { workspace = true }
 # Validation
 regex = { workspace = true }
 
-# Network namespace management
-netlink-packet-route = { workspace = true }
-netlink-packet-core = { workspace = true }
-netlink-packet-utils = { workspace = true }
-netlink-sys = { workspace = true }
+# Security (uid checks)
 nix = { workspace = true }
 
 # Byte handling

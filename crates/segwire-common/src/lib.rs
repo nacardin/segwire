@@ -12,8 +12,6 @@ pub mod netlink;
 pub mod security;
 pub mod utils;
 
-mod netlink_raw;
-
 #[cfg(test)]
 mod logging_test;
 
@@ -22,7 +20,7 @@ pub use config::{DaemonConfig, NamespaceConfig};
 pub use dbus::{NamespaceState, NamespaceStatus};
 pub use error::{SegwireError, SegwireResult};
 pub use logging::{init_logging, LogConfig, LogContext, LogLevel};
-pub use netlink::{DnsConfig, NamespaceInfo, NetlinkError, NetlinkManager, RouteConfig};
+pub use netlink::{DnsConfig, NamespaceInfo, NetlinkError, RouteConfig};
 pub use security::{
     check_config_directory_security, check_config_file_security, sanitize_config_path,
     sanitize_config_value, sanitize_interface_name, sanitize_namespace_name, SecurityCheckResult,

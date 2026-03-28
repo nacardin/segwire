@@ -60,7 +60,7 @@ async fn test_config_file_lifecycle() {
 /// operations in-memory.
 #[test]
 fn test_simulated_netlink_operations() {
-    use segwire_common::netlink::NetlinkManager;
+    use segwire_daemon::netlink::NetlinkManager;
 
     let mgr = NetlinkManager::new_simulated().expect("Failed to create simulated NetlinkManager");
     assert!(mgr.is_simulated());
@@ -97,7 +97,7 @@ fn test_simulated_netlink_operations() {
 /// Test that duplicate namespace creation fails.
 #[test]
 fn test_simulated_duplicate_namespace() {
-    use segwire_common::netlink::NetlinkManager;
+    use segwire_daemon::netlink::NetlinkManager;
 
     let mgr = NetlinkManager::new_simulated().expect("new_simulated");
     mgr.create_namespace("dup").expect("first create");
@@ -110,7 +110,7 @@ fn test_simulated_duplicate_namespace() {
 /// Test that simulation mode no-ops for interface and route operations.
 #[test]
 fn test_simulated_interface_and_route_ops() {
-    use segwire_common::netlink::NetlinkManager;
+    use segwire_daemon::netlink::NetlinkManager;
 
     let mgr = NetlinkManager::new_simulated().unwrap();
 
